@@ -1,0 +1,170 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+:root {
+  /* Cursor/Vercel Premium Flat Light Theme */
+  --bg-darkest: #F9FAFB;
+  --bg-dark: #F3F4F6;
+  --bg-panel: #F3F4F6;
+  --bg-editor: #FFFFFF;
+  --bg-input: #FFFFFF;
+  --bg-hover: #E5E7EB;
+  --bg-active: #D1D5DB;
+
+  --text-primary: #111827;
+  --text-secondary: #4B5563;
+  --text-muted: #6B7280;
+  --text-bright: #000000;
+
+  --accent: #000000;
+  --accent-glow: transparent;
+  --accent-soft: rgba(0, 0, 0, 0.05);
+  --accent-bright: #000000;
+
+  --border: #E5E7EB;
+  --border-hover: #D1D5DB;
+  --border-accent: rgba(0, 0, 0, 0.15);
+
+  --green: #10B981;
+  --green-glow: transparent;
+  --yellow: #F59E0B;
+  --red: #EF4444;
+  --red-soft: rgba(239, 68, 68, 0.1);
+  --blue: #3B82F6;
+  --cyan: #06B6D4;
+
+  --backdrop-blur: none;
+  --glass-shadow: none;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Inter', -apple-system, sans-serif;
+  background: var(--bg-darkest);
+  color: var(--text-primary);
+  overflow: hidden;
+  height: 100vh;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code,
+kbd,
+pre {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.05);
+  /* Extremely subtle scrollbar */
+  border-radius: 5px;
+  border: 3px solid var(--bg-darkest);
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2) !important;
+}
+
+/* Animations */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes float {
+
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes pulse {
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes progress {
+  0% {
+    left: -30%;
+  }
+
+  100% {
+    left: 100%;
+  }
+}
+
+@keyframes bounce {
+
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.3;
+  }
+
+  30% {
+    transform: translateY(-6px);
+    opacity: 1;
+  }
+}
+
+/* Code highlight theme override */
+.hljs {
+  background: var(--bg-darkest) !important;
+}

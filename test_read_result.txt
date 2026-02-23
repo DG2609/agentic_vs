@@ -1,0 +1,7 @@
+Tools: ['file_read']
+Title: AnalyticsEngine methods and returns
+
+- `top_selling_products(limit: int = 10)`: Returns a list of dictionaries containing product sales data (product_id, name, total_quantity, total_revenue)
+- `revenue_by_category()`: Returns a dictionary with category names as keys and revenue totals as values (formatted as strings)
+- `customer_lifetime_value(customer_id: str)`: Returns a dictionary with customer lifetime value metrics (total_spent, order_count, average_order_value, total_loyalty_points, first_order, last_order)
+- `conversion_funnel()`: Returns a dictionary with order status distribution as a funnel (total_orders, funnel with status counts and percentages)AnalyticsEngine methods and returns

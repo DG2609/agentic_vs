@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual env
+env/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# Data & DB
+data/
+*.db
+*.sqlite3
+chroma_db/
+
+# Workspace (user projects — not part of source)
+workspace/
+
+# External references
+continue_dev_ref/
+opencode_ref/
+milvus/
+
+# Node
+node_modules/
+frontend/.next/
+frontend/out/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Logs
+*.log
+
+# Compiled
+*.pyc
+*.pyo

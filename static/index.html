@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic IDE</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+
+<body>
+    <div class="ide">
+        <!-- Activity Bar (far left icons) -->
+        <div class="activity-bar">
+            <button class="activity-btn active" data-panel="explorer" title="Explorer">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                </svg>
+            </button>
+            <button class="activity-btn" data-panel="search" title="Search">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <circle cx="11" cy="11" r="8" />
+                    <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                </svg>
+            </button>
+            <button class="activity-btn" data-panel="tools" title="Tools">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path
+                        d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+                </svg>
+            </button>
+            <div class="activity-spacer"></div>
+            <button class="activity-btn" data-panel="chat" title="AI Chat" id="chatToggleBtn">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                    <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                </svg>
+                <span class="chat-badge" id="chatBadge" style="display:none">!</span>
+            </button>
+        </div>
+
+        <!-- Sidebar Panel -->
+        <div class="sidebar-panel" id="sidebarPanel">
+            <!-- Explorer Panel -->
+            <div class="panel-content" id="explorerPanel">
+                <div class="panel-header">
+                    <span class="panel-title">EXPLORER</span>
+                    <button class="panel-action" id="refreshBtn" title="Refresh">⟳</button>
+                </div>
+                <div class="file-tree" id="fileTree">
+                    <div class="tree-loading">Loading...</div>
+                </div>
+            </div>
+            <!-- Search Panel -->
+            <div class="panel-content" id="searchPanel" style="display:none">
+                <div class="panel-header"><span class="panel-title">SEARCH</span></div>
+                <div class="search-box">
+                    <input type="text" id="searchInput" placeholder="Search in files...">
+                </div>
+                <div class="search-results" id="searchResults"></div>
+            </div>
+            <!-- Tools Panel -->
+            <div class="panel-content" id="toolsPanel" style="display:none">
+                <div class="panel-header"><span class="panel-title">ACTIVE TOOLS</span></div>
+                <div class="tool-panel" id="toolPanel">
+                    <div class="tool-empty">No tools running</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Resize Handle -->
+        <div class="resize-handle" id="sidebarResize"></div>
+
+        <!-- Editor Area -->
+        <div class="editor-area" id="editorArea">
+            <!-- Tabs -->
+            <div class="tab-bar" id="tabBar">
+                <div class="tabs" id="tabs">
+                    <!-- tabs added dynamically -->
+                </div>
+            </div>
+
+            <!-- Editor Content -->
+            <div class="editor-content" id="editorContent">
+                <!-- Welcome screen when no file open -->
+                <div class="welcome-screen" id="welcomeScreen">
+                    <div class="welcome-logo">⚡</div>
+                    <h1>Agentic IDE</h1>
+                    <p class="welcome-sub">AI-Powered Code Editor</p>
+                    <div class="welcome-info">
+                        <span class="welcome-model" id="welcomeModel">Loading model...</span>
+                    </div>
+                    <div class="welcome-shortcuts">
+                        <div class="shortcut-item" onclick="toggleChat()">
+                            <kbd>Ctrl+Shift+I</kbd>
+                            <span>Open AI Chat</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <kbd>Ctrl+S</kbd>
+                            <span>Save File</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <kbd>Ctrl+N</kbd>
+                            <span>New Conversation</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Code editor (hidden until file opened) -->
+                <div class="code-editor" id="codeEditor" style="display:none">
+                    <div class="editor-info-bar" id="editorInfoBar">
+                        <span class="file-lang" id="fileLang">plaintext</span>
+                        <span class="file-path" id="filePathDisplay"></span>
+                        <span class="file-modified" id="fileModified" style="display:none">● Modified</span>
+                        <button class="save-btn" id="saveBtn" style="display:none" title="Save (Ctrl+S)">💾
+                            Save</button>
+                    </div>
+                    <div class="editor-wrapper">
+                        <div class="line-numbers" id="lineNumbers"></div>
+                        <textarea class="code-textarea" id="codeTextarea" spellcheck="false"></textarea>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Chat / AI Panel (right side) -->
+        <div class="chat-panel" id="chatPanel">
+            <div class="chat-header">
+                <div class="chat-header-left">
+                    <span class="chat-title-icon">⚡</span>
+                    <span class="chat-title-text">AI Assistant</span>
+                    <span class="connection-status" id="connectionStatus">
+                        <span class="status-dot"></span>
+                    </span>
+                </div>
+                <div class="chat-header-right">
+                    <button class="chat-action-btn" id="newChatBtn" title="New Conversation (Ctrl+N)">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19" />
+                            <line x1="5" y1="12" x2="19" y2="12" />
+                        </svg>
+                    </button>
+                    <button class="chat-close" id="chatCloseBtn" title="Close">✕</button>
+                </div>
+            </div>
+
+            <!-- Model info bar -->
+            <div class="chat-model-bar" id="chatModelBar">
+                <span class="model-label">Model:</span>
+                <span class="model-name" id="modelName">loading...</span>
+                <span class="model-separator">•</span>
+                <span class="model-provider" id="modelProvider">...</span>
+            </div>
+
+            <div class="messages-container" id="messagesContainer">
+                <div class="messages" id="messages">
+                    <div class="message assistant-message">
+                        <div class="msg-content">
+                            <p>👋 Hi! I can read, search, write, and analyze your code. I have <strong>27 tools</strong>
+                                at my disposal including web search, task tracking, and planning.</p>
+                        </div>
+                        <div class="msg-time"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chat-input-area">
+                <!-- Stop button (hidden by default) -->
+                <button class="stop-btn" id="stopBtn" style="display:none" title="Stop Generation">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                        <rect x="4" y="4" width="16" height="16" rx="2" />
+                    </svg>
+                    Stop
+                </button>
+                <div class="chat-input-wrapper">
+                    <textarea id="messageInput" placeholder="Ask about your code..." rows="1"></textarea>
+                    <button class="send-btn" id="sendBtn" title="Send">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <line x1="22" y1="2" x2="11" y2="13" />
+                            <polygon points="22 2 15 22 11 13 2 9 22 2" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Status Bar (bottom) -->
+    <div class="status-bar" id="statusBar">
+        <div class="status-left">
+            <span class="status-item status-connection" id="statusConnection">
+                <span class="status-dot-mini"></span>
+                Connected
+            </span>
+            <span class="status-item" id="statusModel">⚡ Loading...</span>
+        </div>
+        <div class="status-right">
+            <span class="status-item" id="statusTools">🔧 27 tools</span>
+            <span class="status-item" id="statusWorkspace">📂 workspace</span>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>

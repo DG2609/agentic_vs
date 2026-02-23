@@ -1,0 +1,31 @@
+TITLE: Analyze ecommerce_system.py classes bugs patterns
+TOOLS: ['code_analyze']
+RESPONSE LENGTH: 1692 chars
+============================================================
+### 1. All Classes
+
+- **Enums**: `OrderStatus`, `PaymentMethod`, `DiscountType`, `ShippingMethod`
+- **Data Models**: `Address`, `Product`, `OrderItem`, `Coupon`
+- **Payment Processing**: `PaymentProcessor` (abstract), `CreditCardProcessor`, `PayPalProcessor`
+- **Core Systems**: `InventoryManager`, `OrderProcessor`, `NotificationService`, `AnalyticsEngine`
+
+### 2. Bugs/Issues
+
+- **Line 183**: Discount validation logic is incorrect - `self.discount_amount > self.subtotal + self.discount_amount` will always be false
+- **Line 221**: Missing validation for negative discount values in `calculate_discount`
+- **Line 516**: Tax region parsing assumes state exists in all countries (fails for countries without states)
+- **Line 649**: Refund processing doesn't handle payment processor failures gracefully
+- **Line 796**: Email sending has no error handling for SMTP failures
+- **Line 823**: Analytics excludes cancelled/refunded orders but includes them in revenue calculations
+
+### 3. Design Patterns Used
+
+- **Strategy Pattern**: Different payment processors (`PaymentProcessor` abstract class with concrete implementations)
+- **Factory Pattern**: Order ID generation creates unique identifiers
+- **Observer Pattern**: Notification service sends emails based on order state changes
+- **Repository Pattern**: InventoryManager manages product data and stock
+- **Decorator Pattern**: Discounts modify order totals without changing core logic
+- **Singleton-like**: InventoryManager maintains state across the system
+- **Command Pattern**: Order operations (create, cancel, pay) encapsulated as methods
+
+The system follows good OOP principles with clear separation of concerns and modular design.
