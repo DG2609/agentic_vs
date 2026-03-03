@@ -124,17 +124,48 @@ def _create_llm(streaming: bool = True, temperature: float = 0.3, fast: bool = F
         fast: If True, use the cheaper/faster model (for subagents, summarization).
               Falls back to the main model if no fast model is configured.
     """
-    if config.LLM_PROVIDER == "openai":
+    provider = config.LLM_PROVIDER
+
+    if provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        model = (getattr(config, "ANTHROPIC_FAST_MODEL", "") or config.ANTHROPIC_MODEL
+                 if fast else config.ANTHROPIC_MODEL)
+        return ChatAnthropic(
+            model=model,
+            api_key=config.ANTHROPIC_API_KEY,
+            temperature=temperature,
+            streaming=streaming,
+        )
+
+    elif provider == "google":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        model = (getattr(config, "GOOGLE_FAST_MODEL", "") or config.GOOGLE_MODEL
+                 if fast else config.GOOGLE_MODEL)
+        return ChatGoogleGenerativeAI(
+            model=model,
+            google_api_key=config.GOOGLE_API_KEY,
+            temperature=temperature,
+            streaming=streaming,
+        )
+
+    elif provider in ("openai", "github"):
+        # "github" = GitHub Models API (OpenAI-compatible endpoint)
+        # Set OPENAI_BASE_URL=https://models.inference.ai.azure.com in .env
         from langchain_openai import ChatOpenAI
         model = (getattr(config, "OPENAI_FAST_MODEL", "") or config.OPENAI_MODEL
                  if fast else config.OPENAI_MODEL)
-        return ChatOpenAI(
+        kwargs = dict(
             model=model,
             api_key=config.OPENAI_API_KEY,
             temperature=temperature,
             streaming=streaming,
         )
-    else:
+        base_url = getattr(config, "OPENAI_BASE_URL", "")
+        if base_url:
+            kwargs["base_url"] = base_url
+        return ChatOpenAI(**kwargs)
+
+    else:  # ollama (default)
         from langchain_ollama import ChatOllama
         model = (getattr(config, "OLLAMA_FAST_MODEL", "") or config.OLLAMA_MODEL
                  if fast else config.OLLAMA_MODEL)
