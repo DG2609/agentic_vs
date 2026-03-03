@@ -1,0 +1,140 @@
+version: "3.9"
+
+# ── ShadowDev Agentic IDE — docker-compose ──────────────────────
+# Profiles:
+#   default    → ShadowDev + Ollama (self-hosted LLM)
+#   openai     → ShadowDev with OpenAI API (no Ollama)
+#
+# Usage:
+#   docker compose up                     # Ollama mode
+#   docker compose --profile openai up    # OpenAI mode
+#   docker compose --profile milvus up    # with Milvus vector DB
+# ──────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Main application ─────────────────────────────────────────
+  shadowdev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: shadowdev:latest
+    container_name: shadowdev
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      # Persist data (graph DB, memory DB, chroma DB, tool output cache)
+      - shadowdev_data:/app/data
+      # Mount a local workspace directory for the agent to work on
+      - ${WORKSPACE_PATH:-./workspace}:/app/workspace
+    environment:
+      # LLM
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:14b}
+      OLLAMA_FAST_MODEL: ${OLLAMA_FAST_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+      OPENAI_FAST_MODEL: ${OPENAI_FAST_MODEL:-gpt-4o-mini}
+      # Embedding
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      # Server
+      HOST: "0.0.0.0"
+      PORT: "8000"
+      API_KEY: ${API_KEY:-}
+      AGENT_TIMEOUT: ${AGENT_TIMEOUT:-0}
+      # Workspace & Vector DB
+      WORKSPACE_DIR: /app/workspace
+      VECTOR_BACKEND: ${VECTOR_BACKEND:-chroma}
+      # Ripgrep (pre-installed in image)
+      RIPGREP_PATH: rg
+    depends_on:
+      ollama:
+        condition: service_healthy
+        required: false
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Ollama (self-hosted LLM) ──────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    # GPU: uncomment the deploy block below for NVIDIA GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Milvus (optional vector DB, VECTOR_BACKEND=milvus) ────────
+  milvus:
+    image: milvusdb/milvus:latest
+    container_name: milvus
+    profiles: [milvus]
+    restart: unless-stopped
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports:
+      - "19530:19530"
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: milvus-etcd
+    profiles: [milvus]
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+
+  minio:
+    image: minio/minio:RELEASE.2023-03-13T19-46-17Z
+    container_name: milvus-minio
+    profiles: [milvus]
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://minio:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+volumes:
+  shadowdev_data:
+  ollama_models:
+  etcd_data:
+  minio_data:
