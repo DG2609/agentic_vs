@@ -33,7 +33,14 @@ class AgentState(BaseModel):
 
     # Agent Mode ('chat', 'plan', 'code')
     mode: str = "code"
-    
+
     # Active Agent in Swarm ('planner', 'coder')
     active_agent: str = "planner"
+
+    # Token budget tracking
+    session_turns: int = 0          # number of LLM invocations this session
+    total_tokens_used: int = 0      # estimated cumulative token usage
+
+    # Checkpoint: list of completed step descriptions for resume
+    completed_steps: list[str] = []
 

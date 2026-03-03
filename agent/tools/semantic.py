@@ -1,11 +1,15 @@
 """
-Tools: semantic_search and index_codebase — powered by Milvus + Ollama embeddings.
-All outputs go through universal truncation.
+Tools: semantic_search and index_codebase.
+
+Backend is configurable via VECTOR_BACKEND env var:
+  'chroma'  (default) — ChromaDB, no Docker needed, pip install chromadb
+  'milvus'            — Milvus standalone, requires Docker on port 19530
 """
 from langchain_core.tools import tool
-from indexer.code_indexer import get_indexer
+from indexer import get_indexer  # routes to chroma or milvus based on config
 from agent.tools.truncation import truncate_output
 from models.tool_schemas import SemanticSearchArgs, IndexCodebaseArgs
+import config
 
 
 @tool(args_schema=SemanticSearchArgs)
@@ -32,7 +36,14 @@ def semantic_search(
     Returns:
         Relevant code chunks ranked by similarity, with file paths and line numbers.
     """
-    indexer = get_indexer()
+    try:
+        indexer = get_indexer()
+    except ImportError as e:
+        return (
+            f"⚠️ Vector backend not available: {e}\n"
+            "Install ChromaDB: pip install chromadb\n"
+            "Or set VECTOR_BACKEND=milvus in .env to use Milvus."
+        )
 
     if indexer.total_chunks == 0:
         return "⚠️ Codebase is not indexed yet. Use the `index_codebase` tool first."
@@ -80,8 +91,8 @@ def semantic_search(
 def index_codebase(force: bool = False) -> str:
     """Index or re-index the workspace codebase for semantic search.
 
-    This scans all code files, splits them into chunks, generates embeddings
-    via Ollama, and stores them in Milvus vector database.
+    Scans all code files, splits into AST-aware chunks, generates embeddings
+    via Ollama, and stores in the configured vector database (ChromaDB by default).
 
     Only new or modified files are indexed (unless force=True).
 
@@ -91,7 +102,14 @@ def index_codebase(force: bool = False) -> str:
     Returns:
         Indexing statistics.
     """
-    indexer = get_indexer()
+    try:
+        indexer = get_indexer()
+    except ImportError as e:
+        return (
+            f"⚠️ Vector backend not available: {e}\n"
+            "Install ChromaDB: pip install chromadb\n"
+            "Or set VECTOR_BACKEND=milvus in .env to use Milvus."
+        )
 
     # Pre-check: verify Ollama is reachable
     import requests
@@ -107,6 +125,7 @@ def index_codebase(force: bool = False) -> str:
 
     stats = indexer.index_workspace(force=force)
 
+    backend = getattr(indexer, "get_stats", lambda: {})().get("backend", config.VECTOR_BACKEND)
     output = [
         "📊 Indexing complete!",
         f"  ✅ Indexed: {stats['indexed']} files",
@@ -115,5 +134,6 @@ def index_codebase(force: bool = False) -> str:
         f"  📦 Total chunks in DB: {stats['total_chunks']}",
         f"  📁 Workspace: {indexer.workspace}",
         f"  🧠 Embedding: {indexer.embedding_model}",
+        f"  🗄️ Backend: {backend}",
     ]
     return "\n".join(output)

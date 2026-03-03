@@ -11,7 +11,9 @@ Enhanced with 6 operations (inspired by OpenCode's lsp.ts with 9 ops):
 - lsp_diagnostics: Get file errors/warnings
 - lsp_rename_preview: Preview rename changes
 """
+import logging
 import os
+import shutil
 import sys
 import json
 import subprocess
@@ -22,6 +24,16 @@ from langchain_core.tools import tool
 import config
 from agent.tools.truncation import truncate_output
 from models.tool_schemas import LSPPositionArgs, LSPFileArgs
+
+logger = logging.getLogger(__name__)
+
+# Check pyright availability at module load — avoids silent failure at runtime
+_PYRIGHT_PATH = shutil.which("pyright")
+if not _PYRIGHT_PATH:
+    logger.warning(
+        "[lsp] pyright not found on PATH — lsp_diagnostics will be unavailable. "
+        "Install with: npm install -g pyright  OR  pip install pyright"
+    )
 
 
 class LSPClient:
@@ -41,6 +53,8 @@ class LSPClient:
             return
 
         print(f"Starting LSP server: {' '.join(self.command)}")
+        # shell=True on Windows only: required for PATH resolution of node/pyright executables.
+        # Command is a trusted server binary, not user input.
         self.process = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,
@@ -92,8 +106,22 @@ class LSPClient:
                 print(f"LSP Read Error: {e}")
                 break
 
+        # Process died or read loop ended — wake all pending requests with an error
+        # so callers don't hang for the full timeout.
+        with self.lock:
+            for req_id, event in list(self.requests.items()):
+                if req_id not in self.responses:
+                    self.responses[req_id] = {"error": "LSP process terminated unexpectedly"}
+                    event.set()
+
     def send_request(self, method: str, params: dict) -> Any:
         self.start()
+
+        # CRITICAL: check process is alive BEFORE registering request.
+        # If we register first and the process is dead, _receive_loop may have
+        # already exited — our event will never be set and we hang for 5 seconds.
+        if self.process is None or self.process.poll() is not None:
+            return {"error": "LSP server is not running"}
 
         with self.lock:
             self.request_id += 1
@@ -108,19 +136,31 @@ class LSPClient:
         }
 
         body = json.dumps(msg)
-        content = f"Content-Length: {len(body)}\r\n\r\n{body}"
+        body_bytes = body.encode('utf-8')
+        header = f"Content-Length: {len(body_bytes)}\r\n\r\n".encode('utf-8')
 
         try:
-            self.process.stdin.write(content.encode('utf-8'))
+            self.process.stdin.write(header + body_bytes)
             self.process.stdin.flush()
         except Exception as e:
+            with self.lock:
+                self.requests.pop(req_id, None)
             return {"error": str(e)}
 
-        if not self.requests[req_id].wait(timeout=10.0):
+        # 5-second timeout (reduced from 10s) — industry standard for LSP
+        if not self.requests[req_id].wait(timeout=5.0):
+            # Clean up to prevent memory leak when response eventually arrives
+            with self.lock:
+                self.requests.pop(req_id, None)
+                self.responses.pop(req_id, None)
             return {"error": "Timeout waiting for LSP response"}
 
-        response = self.responses.pop(req_id)
-        self.requests.pop(req_id)
+        with self.lock:
+            response = self.responses.pop(req_id, None)
+            self.requests.pop(req_id, None)
+
+        if not response:
+            return {"error": "No response received from LSP server"}
 
         if "error" in response:
             return {"error": response["error"]}
@@ -135,9 +175,10 @@ class LSPClient:
             "params": params
         }
         body = json.dumps(msg)
-        content = f"Content-Length: {len(body)}\r\n\r\n{body}"
+        body_bytes = body.encode('utf-8')
+        header = f"Content-Length: {len(body_bytes)}\r\n\r\n".encode('utf-8')
         try:
-            self.process.stdin.write(content.encode('utf-8'))
+            self.process.stdin.write(header + body_bytes)
             self.process.stdin.flush()
         except Exception:
             pass
@@ -213,21 +254,68 @@ class LSPClient:
 
 
 # ── Helpers ─────────────────────────────────────────────────
-PYRIGHT_CMD = ["pyright-langserver", "--stdio"]
 _pyright_client = None
+_lsp_unavailable_reason: str = ""
+
+
+def _detect_python_lsp_cmd() -> list[str]:
+    """Detect an available Python LSP server on PATH.
+
+    Priority: pyright-langserver → pylsp → python -m pylsp
+    Returns empty list if none found.
+    """
+    import shutil
+    candidates = [
+        (["pyright-langserver", "--stdio"], "pyright-langserver"),
+        (["pylsp"], "pylsp"),
+        ([sys.executable, "-m", "pylsp"], "pylsp (module)"),
+    ]
+    for cmd, label in candidates:
+        binary = cmd[0]
+        # For `sys.executable -m module` form, check if module importable
+        if binary == sys.executable:
+            try:
+                import pylsp  # noqa: F401
+                return cmd
+            except ImportError:
+                continue
+        if shutil.which(binary):
+            return cmd
+    return []
 
 
 def get_pyright():
-    global _pyright_client
-    if _pyright_client is None:
-        _pyright_client = LSPClient(PYRIGHT_CMD)
+    """Get (or lazily create) the Python LSP client.
+
+    Auto-detects pyright-langserver, falls back to pylsp.
+    Returns None if no LSP server is available.
+    """
+    global _pyright_client, _lsp_unavailable_reason
+
+    if _pyright_client is not None:
+        # Restart if process died
+        if _pyright_client.process and _pyright_client.process.poll() is not None:
+            _pyright_client = None
+        else:
+            return _pyright_client
+
+    cmd = _detect_python_lsp_cmd()
+    if not cmd:
+        _lsp_unavailable_reason = (
+            "No Python LSP server found. Install one:\n"
+            "  pip install pyright    (recommended)\n"
+            "  pip install python-lsp-server"
+        )
+        return None
+
+    _lsp_unavailable_reason = ""
+    _pyright_client = LSPClient(cmd)
     return _pyright_client
 
 
 def _resolve_path(p: str) -> str:
-    if os.path.isabs(p):
-        return p
-    return os.path.join(config.WORKSPACE_DIR, p)
+    from agent.tools.utils import resolve_tool_path
+    return resolve_tool_path(p)
 
 
 def _file_uri(file_path: str) -> str:
@@ -243,7 +331,9 @@ def _parse_uri(uri: str) -> str:
     return path
 
 
-def _ensure_open(client: LSPClient, file_path: str) -> str | None:
+def _ensure_open(client: LSPClient | None, file_path: str) -> str | None:
+    if client is None:
+        return _lsp_unavailable_reason or "LSP server not available."
     """Open file in LSP if not already, return content or error."""
     resolved = _resolve_path(file_path)
     if not os.path.isfile(resolved):
@@ -311,7 +401,7 @@ def lsp_definition(file_path: str, line: int, col: int) -> str:
         return err
 
     try:
-        result = client.definition(file_path, line, col)
+        result = client.definition(file_path, line, col)  # type: ignore[union-attr]
         if isinstance(result, dict) and "error" in result:
             return f"LSP Error: {result['error']}"
         return f"Definition:\n{_format_locations(result)}"
@@ -337,7 +427,7 @@ def lsp_references(file_path: str, line: int, col: int) -> str:
         return err
 
     try:
-        result = client.references(file_path, line, col)
+        result = client.references(file_path, line, col)  # type: ignore[union-attr]
         if isinstance(result, dict) and "error" in result:
             return f"LSP Error: {result['error']}"
 
@@ -370,7 +460,7 @@ def lsp_hover(file_path: str, line: int, col: int) -> str:
         return err
 
     try:
-        result = client.hover(file_path, line, col)
+        result = client.hover(file_path, line, col)  # type: ignore[union-attr]
         if isinstance(result, dict) and "error" in result:
             return f"LSP Error: {result['error']}"
 
@@ -411,7 +501,7 @@ def lsp_symbols(file_path: str) -> str:
         return err
 
     try:
-        result = client.document_symbol(file_path)
+        result = client.document_symbol(file_path)  # type: ignore[union-attr]
         if isinstance(result, dict) and "error" in result:
             return f"LSP Error: {result['error']}"
 
@@ -464,11 +554,16 @@ def lsp_diagnostics(file_path: str) -> str:
     # Pyright publishes diagnostics via notifications, not request.
     # We need to trigger analysis and wait for textDocument/publishDiagnostics.
     # For now, use a simple CLI approach as fallback.
+    if not _PYRIGHT_PATH:
+        return "lsp_diagnostics unavailable: pyright not found. Install: npm install -g pyright"
+
     resolved = _resolve_path(file_path)
 
     try:
+        # shell=True on Windows only: required to locate pyright on PATH.
+        # Command is a trusted CLI tool; resolved path is workspace-sandboxed.
         result = subprocess.run(
-            ["pyright", "--outputjson", resolved],
+            [_PYRIGHT_PATH, "--outputjson", resolved],
             capture_output=True, text=True, timeout=30,
             encoding="utf-8", errors="replace",
             shell=True if os.name == 'nt' else False,

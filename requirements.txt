@@ -1,5 +1,5 @@
 # LangGraph + LangChain
-langgraph>=0.2.0
+langgraph>=0.2.57
 langgraph-checkpoint-sqlite>=1.0.0
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
@@ -7,26 +7,33 @@ langchain-ollama>=0.2.0
 
 # Data Models
 pydantic>=2.0
+pydantic-settings>=2.0
 
-# Vector Database
-pymilvus>=2.4.0
+# Vector Database — ChromaDB (default, no Docker)
+chromadb>=0.5.0
+
+# Vector Database — Milvus (optional, requires Docker on port 19530)
+# pymilvus>=2.4.0
 
 # Server — Socket.IO + aiohttp
 python-socketio[aiohttp]>=5.0
-aiohttp>=3.0
+aiohttp>=3.9
+aiohttp-cors>=0.7
 
-# gRPC
-grpcio>=1.60
-grpcio-tools>=1.60
+# gRPC (optional — remove if not using gRPC transport)
+# grpcio>=1.60
+# grpcio-tools>=1.60
 
 # Utilities
-aiofiles>=24.0
+aiofiles>=24.0,<25.0
 aiosqlite>=0.19.0
 python-dotenv>=1.0
-requests>=2.31
+requests>=2.31,<3.0
+
+# Static analysis (for lsp_diagnostics Python backend)
 pyright>=1.1.0
 
-# Markdown rendering (backend)
+# Markdown rendering
 markdown>=3.7
 Pygments>=2.19
 
@@ -34,5 +41,5 @@ Pygments>=2.19
 duckduckgo_search>=5.0
 
 # CLI UI
-rich>=13.9.4
+rich>=13.9.4,<14.0
 prompt_toolkit>=3.0.48

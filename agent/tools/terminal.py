@@ -8,6 +8,7 @@ import time
 from langchain_core.tools import tool
 import config
 from agent.tools.truncation import truncate_output
+from agent.tools.utils import resolve_path_safe
 from models.tool_schemas import TerminalExecArgs
 
 
@@ -23,10 +24,35 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
     Returns:
         Command stdout/stderr output, truncated if too long.
     """
-    work_dir = cwd or config.WORKSPACE_DIR
+    # Block catastrophically destructive commands regardless of cwd
+    _DENIED_PATTERNS = [
+        "rm -rf /", "rm -rf /*", "rm -rf ~",  # Nuke root/home
+        "dd if=", "mkfs.",                      # Disk wipe / format
+        "> /dev/sda", "> /dev/nvme",            # Direct disk write
+        ":(){ :|:& };:",                        # Fork bomb
+        "chmod -R 777 /", "chmod -R 000 /",    # Permission nuke
+    ]
+    cmd_lower = command.strip().lower()
+    for pattern in _DENIED_PATTERNS:
+        if pattern.lower() in cmd_lower:
+            return (
+                f"❌ Command blocked: '{command}' matches a dangerous pattern "
+                f"({pattern!r}). This command is never allowed."
+            )
+
+    # Sandbox cwd to workspace boundary
+    if cwd:
+        safe_cwd = resolve_path_safe(cwd)
+        if safe_cwd is None:
+            return f"❌ Error: cwd '{cwd}' is outside the workspace. Access denied."
+        work_dir = safe_cwd
+    else:
+        work_dir = config.WORKSPACE_DIR
     max_timeout = timeout if timeout > 0 else config.TOOL_TIMEOUT
 
     try:
+        # shell=True: command comes from the LLM/user request, not untrusted input.
+        # Sandboxed via work_dir (workspace-bound cwd) and configurable timeout.
         result = subprocess.run(
             command,
             shell=True,
@@ -38,19 +64,24 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
             errors="replace",
         )
 
-        output_parts = []
+        status = (
+            f"Exit code: {result.returncode} ✅"
+            if result.returncode == 0
+            else f"Exit code: {result.returncode} ❌"
+        )
 
+        # Keep stdout and stderr clearly separated.
+        # Stderr is appended LAST so it's least likely to be truncated — it
+        # usually contains the most useful diagnostic information on failure.
+        sections = [status]
         if result.stdout:
-            output_parts.append(result.stdout)
-
+            sections.append(result.stdout.rstrip())
         if result.stderr:
-            output_parts.append(f"[STDERR]\n{result.stderr}")
+            sections.append(f"[STDERR]\n{result.stderr.rstrip()}")
+        if not result.stdout and not result.stderr:
+            sections.append("(no output)")
 
-        if not output_parts:
-            output_parts.append("(no output)")
-
-        status = f"✅ Exit code: {result.returncode}" if result.returncode == 0 else f"❌ Exit code: {result.returncode}"
-        raw = f"{status}\n\n" + "\n".join(output_parts)
+        raw = "\n\n".join(sections)
 
         # Universal truncation — saves full output to disk if truncated
         return truncate_output(raw)

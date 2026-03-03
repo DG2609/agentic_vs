@@ -22,6 +22,14 @@ from models.state import AgentState
 import config
 from agent.tools.truncation import estimate_tokens
 
+# LangGraph interrupt (human-in-the-loop). Available in LangGraph >= 0.2.57.
+try:
+    from langgraph.types import interrupt as _lg_interrupt
+    _INTERRUPT_AVAILABLE = True
+except ImportError:
+    _lg_interrupt = None
+    _INTERRUPT_AVAILABLE = False
+
 BASE_SYSTEM_PROMPT = """You are an expert AI coding assistant with deep expertise in software engineering.
 
 ## Core Rules (MANDATORY)
@@ -38,9 +46,19 @@ BASE_SYSTEM_PROMPT = """You are an expert AI coding assistant with deep expertis
 - **Edit files**: `file_edit` uses AIDER-STYLE SEARCH/REPLACE blocks. `old_string` acts as the SEARCH block (must uniquely identify the section even with slightly wrong indentation), and `new_string` acts as the REPLACE block.
 - **Explore structure**: `file_list`, `code_analyze`.
 - **Run commands**: `terminal_exec`.
-- **Web content**: `webfetch`.
+- **Web content**: `webfetch`, `web_search`.
 - **LSP precision**: `lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_symbols`, `lsp_diagnostics`.
 - **Semantic search**: `semantic_search`, `index_codebase`.
+- **Git workflow**: `git_status` → understand state → `git_diff` → review changes → `git_add` → `git_commit`.
+  Always check `git_status` before committing. Use `git_log` to understand project history. Use `git_blame` before editing old code.
+- **Agent Skills**: `skill_list` to see available workflow skills; `skill_invoke(name, arguments)` to load a skill's instructions into context (commit workflow, security audit, code review, refactoring guide, agent personas, etc.); `skill_create(name, description, content)` to save a new workflow skill.
+
+## Parallel Tool Calls (IMPORTANT)
+When you need multiple independent pieces of information, invoke multiple tools **simultaneously in a single response**. Do NOT chain them sequentially if they don't depend on each other.
+
+- **Good**: Reading files A, B, C → call `file_read(A)` + `file_read(B)` + `file_read(C)` in one step.
+- **Good**: Search + read → `code_search(...)` + `file_list(...)` together.
+- **Bad**: Call `file_read(A)`, wait, then call `file_read(B)` in a separate step.
 
 ## Anti-Patterns (NEVER DO THESE)
 - ❌ "Tôi sẽ sử dụng công cụ X để..." → Just call the tool silently
@@ -57,22 +75,32 @@ Use your tools (code_search, read, lsp, etc.) to understand the codebase.
 When you have a complete understanding and a solid plan, call the `handoff_to_coder` tool with your instructions.
 
 Rules:
-1. Always explore the codebase first.
-2. PRIORITY (Documentation): Propose or write comprehensive documentation (e.g. system architecture, docstrings, README updates) BEFORE actual implementation. Well-documented projects are mandatory.
-3. Formulate a step-by-step actionable plan.
-4. Hand off to the Coder agent to execute the plan.
+1. **Start with context_build** — run `context_build(description)` first to auto-find relevant files.
+2. Use parallel tool calls for multi-file reads.
+3. Use `code_quality` to assess file health before planning refactors.
+4. Use `dep_graph` to understand module dependencies before architectural changes.
+5. Use `memory_search` at session start to recall past decisions about this project.
+5. PRIORITY (Documentation): Propose comprehensive docs BEFORE implementation.
+6. Formulate a clear, step-by-step actionable plan.
+7. Hand off to the Coder agent to execute the plan.
 """
 
 CODER_PROMPT = BASE_SYSTEM_PROMPT + """
 # YOUR ROLE: CODER AGENT (Expert Software Engineer)
 Your job is to execute the plan provided by the Planner.
-You CAN edit files and run terminal commands.
+You CAN edit files, run terminal commands, and make git commits.
 
 Rules:
-1. Use `file_edit` (AIDER-STYLE) to modify code.
-2. Use `terminal_exec` to run tests and builds. Don't stop if there's an error; read the output and fix it.
-3. If the plan is fundamentally flawed or you need architectural guidance, call `handoff_to_planner`.
-4. Be concise. Focus on doing the work.
+1. Use `file_edit` (AIDER-STYLE) for single-file changes; use `file_edit_batch` for atomic multi-file changes.
+2. Use `run_tests` to verify your changes. Don't stop if there's an error — read the output and fix it.
+3. Use `terminal_exec` for builds and other shell commands.
+4. If the plan is fundamentally flawed or you need architectural guidance, call `handoff_to_planner`.
+5. Be concise. Focus on doing the work.
+6. **Git workflow**: After completing a logical unit of work, use `git_add` + `git_commit` to save progress.
+   - Check `git_status` before committing to see exactly what changed.
+   - Write clear commit messages describing WHAT changed and WHY.
+   - Never commit broken code — run `run_tests` first.
+7. Use `memory_save` to persist important facts, patterns, or decisions for future sessions.
 """
 
 # ── Compaction constants ────────────────────────────────────────
@@ -81,26 +109,37 @@ PRUNE_MINIMUM = getattr(config, "PRUNE_MINIMUM", 20000)
 PRUNE_PROTECT = getattr(config, "PRUNE_PROTECT", 40000)
 
 # ── Doom loop detection ────────────────────────────────────────
-DOOM_LOOP_MAX = 2  # max identical consecutive tool calls before breaking
+DOOM_LOOP_MAX = 3  # max identical consecutive tool calls before breaking
 
 
 # ─────────────────────────────────────────────────────────────
 # LLM creation
 # ─────────────────────────────────────────────────────────────
-def _create_llm(streaming: bool = True, temperature: float = 0.3):
-    """Create LLM instance based on configured provider."""
+def _create_llm(streaming: bool = True, temperature: float = 0.3, fast: bool = False):
+    """Create LLM instance based on configured provider.
+
+    Args:
+        streaming: Enable streaming output.
+        temperature: Sampling temperature.
+        fast: If True, use the cheaper/faster model (for subagents, summarization).
+              Falls back to the main model if no fast model is configured.
+    """
     if config.LLM_PROVIDER == "openai":
         from langchain_openai import ChatOpenAI
+        model = (getattr(config, "OPENAI_FAST_MODEL", "") or config.OPENAI_MODEL
+                 if fast else config.OPENAI_MODEL)
         return ChatOpenAI(
-            model=config.OPENAI_MODEL,
+            model=model,
             api_key=config.OPENAI_API_KEY,
             temperature=temperature,
             streaming=streaming,
         )
     else:
         from langchain_ollama import ChatOllama
+        model = (getattr(config, "OLLAMA_FAST_MODEL", "") or config.OLLAMA_MODEL
+                 if fast else config.OLLAMA_MODEL)
         return ChatOllama(
-            model=config.OLLAMA_MODEL,
+            model=model,
             base_url=config.OLLAMA_BASE_URL,
             temperature=temperature,
         )
@@ -110,6 +149,67 @@ def get_llm(tools: list):
     """Create and return the LLM with tools bound."""
     llm = _create_llm(streaming=True)
     return llm.bind_tools(tools)
+
+
+# ─────────────────────────────────────────────────────────────
+# Retry wrapper for LLM invocation
+# ─────────────────────────────────────────────────────────────
+async def _invoke_with_retry(llm, messages: list, max_retries: int = 3) -> AIMessage:
+    """Invoke LLM with retry logic for transient failures.
+
+    Retries on connection errors and rate limits with exponential backoff.
+    """
+    import asyncio
+    import traceback as _tb
+
+    for attempt in range(max_retries):
+        try:
+            return await llm.ainvoke(messages)
+        except Exception as e:
+            err_msg = str(e).lower()
+            is_retryable = any(k in err_msg for k in [
+                "timeout", "connection", "rate_limit", "429", "503", "502",
+                "overloaded", "cudamalloc", "out of memory",
+            ])
+            if is_retryable and attempt < max_retries - 1:
+                wait = 2 ** attempt
+                logger.warning(
+                    f"[llm] Retryable error on attempt {attempt + 1}/{max_retries}: "
+                    f"{type(e).__name__}: {e} — retrying in {wait}s"
+                )
+                await asyncio.sleep(wait)
+                continue
+            logger.error(
+                f"[llm] Fatal error after {attempt + 1} attempt(s): "
+                f"{type(e).__name__}: {e}\n{_tb.format_exc()}"
+            )
+            raise
+
+
+# ─────────────────────────────────────────────────────────────
+# Repair malformed tool calls from LLM
+# ─────────────────────────────────────────────────────────────
+def _repair_tool_calls(response: AIMessage) -> AIMessage:
+    """Fix common LLM tool call issues (e.g., string args instead of dict).
+
+    Some models output tool call arguments as a JSON string rather than
+    a parsed dict. This normalizes them.
+    """
+    if not hasattr(response, "tool_calls") or not response.tool_calls:
+        return response
+
+    repaired = []
+    for tc in response.tool_calls:
+        args = tc.get("args", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                args = {"input": args}
+        repaired.append({**tc, "args": args})
+
+    response.tool_calls = repaired
+    return response
 
 
 # ─────────────────────────────────────────────────────────────
@@ -159,28 +259,88 @@ def _load_project_rules(workspace: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# Doom loop detection
+# Doom loop detection + classified recovery
 # ─────────────────────────────────────────────────────────────
-def _detect_doom_loop(messages: list) -> bool:
-    """Detect if the agent is stuck in a loop of identical tool calls."""
-    recent_tool_calls = []
+def _get_recent_tool_calls(messages: list, n: int) -> list[tuple]:
+    """Extract the last n AI tool-call tuples from the message history."""
+    recent = []
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-            # serialize tool call for comparison
-            calls = [(tc.get("name", ""), json.dumps(tc.get("args", {}), sort_keys=True))
-                     for tc in msg.tool_calls]
-            recent_tool_calls.append(tuple(calls))
+            calls = tuple(
+                (tc.get("name", ""), json.dumps(tc.get("args", {}), sort_keys=True))
+                for tc in msg.tool_calls
+            )
+            recent.append(calls)
         elif isinstance(msg, HumanMessage):
-            break  # stop at last human message
+            break
+        if len(recent) >= n:
+            break
+    return recent
 
-        if len(recent_tool_calls) >= DOOM_LOOP_MAX:
+
+def _detect_doom_loop(messages: list) -> bool:
+    """Detect if the agent is stuck in a loop of identical tool calls."""
+    recent = _get_recent_tool_calls(messages, DOOM_LOOP_MAX)
+    if len(recent) >= DOOM_LOOP_MAX and len(set(recent)) == 1:
+        return True
+    return False
+
+
+def _classify_doom_loop(messages: list) -> str:
+    """Classify the type of doom loop for targeted recovery.
+
+    Returns one of: 'tool_error', 'missing_file', 'search_no_result', 'unknown'
+    """
+    # Look at the most recent tool messages for patterns
+    recent_tool_results = []
+    for msg in reversed(messages):
+        if isinstance(msg, ToolMessage):
+            recent_tool_results.append(getattr(msg, "content", ""))
+        elif isinstance(msg, HumanMessage):
+            break
+        if len(recent_tool_results) >= 6:
             break
 
-    if len(recent_tool_calls) >= DOOM_LOOP_MAX:
-        # Check if all are identical
-        if len(set(recent_tool_calls)) == 1:
-            return True
-    return False
+    if not recent_tool_results:
+        return "unknown"
+
+    combined = "\n".join(recent_tool_results).lower()
+
+    if any(k in combined for k in ["error:", "exception", "traceback", "failed"]):
+        return "tool_error"
+    if any(k in combined for k in ["not found", "does not exist", "no such file"]):
+        return "missing_file"
+    if any(k in combined for k in ["no matches", "no results", "0 results"]):
+        return "search_no_result"
+    return "unknown"
+
+
+def _build_recovery_message(loop_type: str, messages: list) -> str:
+    """Build a targeted recovery hint based on loop classification."""
+    # Extract the repeated tool name for context
+    recent = _get_recent_tool_calls(messages, DOOM_LOOP_MAX)
+    tool_name = recent[0][0][0] if recent and recent[0] else "unknown tool"
+
+    if loop_type == "tool_error":
+        return (
+            f"I've called `{tool_name}` {DOOM_LOOP_MAX} times and it keeps failing. "
+            "Let me try a different approach: I'll check the error details and adapt."
+        )
+    elif loop_type == "missing_file":
+        return (
+            f"I've been trying `{tool_name}` but the target doesn't exist. "
+            "Let me search more broadly for the correct path."
+        )
+    elif loop_type == "search_no_result":
+        return (
+            f"`{tool_name}` keeps returning no results. "
+            "Let me broaden my search terms or look in different locations."
+        )
+    else:
+        return (
+            f"I'm repeating `{tool_name}` without progress. "
+            "Let me reassess my approach and try something different."
+        )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -226,11 +386,10 @@ def _prune_tool_outputs(messages: list) -> list:
     for i, msg in enumerate(messages):
         if i < protect_from and isinstance(msg, ToolMessage):
             tokens = _msg_tokens(msg)
-            if tokens > 200:  # only prune large outputs
-                # Keep first 100 chars as preview
+            if tokens > 200:  # only prune large outputs (>200 tokens / ~800 chars)
                 content = getattr(msg, "content", "")
                 if isinstance(content, str):
-                    preview = content[:200]
+                    preview = content[:800]  # preview ~200 tokens worth
                     pruned_msg = ToolMessage(
                         content=f"[Output compacted — {tokens} tokens → preview]\n{preview}...",
                         tool_call_id=msg.tool_call_id,
@@ -254,14 +413,11 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     """
     messages = list(state.messages)
 
-    # Doom loop detection
+    # Doom loop detection + classified recovery
     if _detect_doom_loop(messages):
-        return {
-            "messages": [AIMessage(content=(
-                "I notice I'm repeating the same tool calls. Let me step back and "
-                "try a different approach. Could you clarify what you need?"
-            ))]
-        }
+        loop_type = _classify_doom_loop(messages)
+        recovery_msg = _build_recovery_message(loop_type, messages)
+        return {"messages": [AIMessage(content=recovery_msg)]}
 
     # Build system message & pick LLM
     if state.active_agent == "planner":
@@ -283,8 +439,9 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
 
     full_messages = [SystemMessage(content=system_content)] + _prune_tool_outputs(messages)
 
-    response = await llm.ainvoke(full_messages)
-    
+    response = await _invoke_with_retry(llm, full_messages)
+    response = _repair_tool_calls(response)
+
     active_agent = state.active_agent
     if hasattr(response, "tool_calls") and response.tool_calls:
         for tc in response.tool_calls:
@@ -293,7 +450,17 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
             elif tc.get("name") == "handoff_to_planner":
                 active_agent = "planner"
 
-    return {"messages": [response], "active_agent": active_agent}
+    # Track token budget
+    turn_tokens = _msg_tokens(response)
+    new_turns = state.session_turns + 1
+    new_tokens = state.total_tokens_used + turn_tokens
+
+    return {
+        "messages": [response],
+        "active_agent": active_agent,
+        "session_turns": new_turns,
+        "total_tokens_used": new_tokens,
+    }
 
 
 # ─────────────────────────────────────────────────────────────
@@ -382,7 +549,7 @@ async def summarize_node(state: AgentState) -> dict:
         previous_summary=prev_summary,
     )
 
-    llm = _create_llm(streaming=False, temperature=0.1)
+    llm = _create_llm(streaming=False, temperature=0.1, fast=True)
     response = await llm.ainvoke([HumanMessage(content=prompt)])
 
     # Remove old messages, keep recent ones

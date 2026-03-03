@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 import config
+from agent.tools.truncation import truncate_output
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,8 @@ async def _run_subagent(
     """Run a subagent loop: LLM → tool calls → LLM → ... → final text."""
     from agent.nodes import _create_llm, _invoke_with_retry, _repair_tool_calls
 
-    llm = _create_llm(streaming=False, temperature=0.2)
+    # Use fast model for subagents — they do search/exploration, not deep reasoning
+    llm = _create_llm(streaming=False, temperature=0.2, fast=True)
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     messages = [
@@ -58,10 +60,8 @@ async def _run_subagent(
             if matched:
                 try:
                     result = await matched.ainvoke(tool_args)
-                    result_str = str(result)
-                    # Truncate large outputs
-                    if len(result_str) > 8000:
-                        result_str = result_str[:8000] + f"\n... (truncated, {len(result_str)} total chars)"
+                    # Use universal truncation — saves full output to disk if large
+                    result_str = truncate_output(str(result))
                 except Exception as e:
                     result_str = f"Error: {e}"
             else:
@@ -179,6 +179,62 @@ def _get_general_tools():
 
 
 @tool
+async def task_explore_parallel(tasks: list) -> str:
+    """Run multiple independent exploration tasks in parallel (faster than sequential).
+
+    Each task runs as a separate explore subagent. All tasks execute concurrently
+    using asyncio.gather, so N tasks take ~1x time instead of Nx.
+
+    Use this when you need to explore several unrelated files or answer multiple
+    independent questions at once.
+
+    Args:
+        tasks: List of task descriptions (strings). Each becomes an independent
+               explore subagent. Maximum 5 tasks.
+
+    Returns:
+        Combined results from all tasks, each labeled with its index.
+    """
+    import asyncio
+
+    if not tasks:
+        return "Error: no tasks provided."
+
+    # Normalize — may arrive as plain strings or dicts
+    task_strs = []
+    for t in tasks[:5]:  # cap at 5
+        if isinstance(t, str):
+            task_strs.append(t)
+        elif isinstance(t, dict):
+            task_strs.append(t.get("task", str(t)))
+        else:
+            task_strs.append(str(t))
+
+    logger.info(f"[explore_parallel] Starting {len(task_strs)} tasks concurrently")
+
+    tools = _get_explore_tools()
+
+    async def run_one(idx: int, task: str) -> str:
+        result = await _run_subagent(task, EXPLORE_PROMPT, tools)
+        return f"=== Task {idx + 1}: {task[:60]}{'...' if len(task) > 60 else ''} ===\n{result}"
+
+    results = await asyncio.gather(
+        *[run_one(i, t) for i, t in enumerate(task_strs)],
+        return_exceptions=True,
+    )
+
+    parts = []
+    for r in results:
+        if isinstance(r, Exception):
+            parts.append(f"Error: {r}")
+        else:
+            parts.append(str(r))
+
+    logger.info(f"[explore_parallel] All {len(task_strs)} tasks completed")
+    return "\n\n".join(parts)
+
+
+@tool
 async def task_general(task: str) -> str:
     """Delegate a multi-step task to the general-purpose subagent.
 
@@ -204,4 +260,68 @@ async def task_general(task: str) -> str:
     tools = _get_general_tools()
     result = await _run_subagent(task, GENERAL_PROMPT, tools)
     logger.info(f"[general] Completed. Result length: {len(result)}")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────
+# Reviewer subagent — validates Coder's work
+# ─────────────────────────────────────────────────────────────
+
+REVIEWER_PROMPT = """\
+You are a senior code reviewer. Your job is to validate recent changes and report issues.
+
+You have access to LSP diagnostics, test runner, code quality analysis, and file reading tools.
+
+Review workflow:
+1. Read the changed files (provided in the task)
+2. Run `lsp_diagnostics` on each changed file — report any errors or warnings
+3. Run `run_tests` to check test suite status
+4. Run `code_quality` on heavily changed files — flag new complexity issues
+5. Check for: missing error handling, hardcoded values, missing type hints (Python)
+6. Summarize findings as:
+   - PASSED ✅ or FAILED ❌ overall verdict
+   - List of specific issues by severity (error/warning/suggestion)
+   - Which files/lines need attention
+
+Be precise. Only report real issues — don't nitpick style unless it's a clear problem.
+"""
+
+
+def _get_reviewer_tools():
+    """Tools for the reviewer — read-only + diagnostics + tests."""
+    from agent.tools.code_search import code_search, grep_search, batch_read
+    from agent.tools.file_ops import file_read, glob_search
+    from agent.tools.lsp import lsp_diagnostics, lsp_symbols
+    from agent.tools.code_quality import code_quality
+    from agent.tools.test_runner import run_tests
+    return [
+        file_read, glob_search,
+        code_search, grep_search, batch_read,
+        lsp_diagnostics, lsp_symbols,
+        code_quality, run_tests,
+    ]
+
+
+@tool
+async def task_review(task: str) -> str:
+    """Delegate code review to the Reviewer subagent.
+
+    The Reviewer runs LSP diagnostics, tests, and code quality checks on
+    recently changed files. It returns a PASSED/FAILED verdict with a list
+    of specific issues.
+
+    Use this after the Coder agent finishes implementing a feature or fix,
+    to validate correctness before committing.
+
+    Args:
+        task: Description of what was changed and which files to review.
+              Example: "Review changes to agent/nodes.py and agent/tools/git.py"
+
+    Returns:
+        Review verdict (PASSED/FAILED) with list of issues found.
+    """
+    logger.info(f"[reviewer] Starting review: {task[:100]}...")
+    tools = _get_reviewer_tools()
+    result = await _run_subagent(task, REVIEWER_PROMPT, tools)
+    logger.info(f"[reviewer] Review complete. Result length: {len(result)}")
     return result

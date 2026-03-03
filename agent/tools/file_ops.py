@@ -15,9 +15,15 @@ import difflib
 from langchain_core.tools import tool
 import config
 from agent.tools.truncation import truncate_output
+from agent.tools.utils import resolve_tool_path
 from models.tool_schemas import (
     FileReadArgs, FileWriteArgs, FileEditArgs, FileListArgs, GlobSearchArgs,
+    FileEditBatchArgs,
 )
+
+# Pending diffs for frontend diff view (file_path → {original, modified})
+# server/main.py reads and clears this after emitting file:diff events
+PENDING_DIFFS: dict[str, dict[str, str]] = {}
 
 
 @tool(args_schema=FileReadArgs)
@@ -84,7 +90,9 @@ def file_write(file_path: str, content: str, create_dirs: bool = True) -> str:
 
     try:
         if create_dirs:
-            os.makedirs(os.path.dirname(resolved), exist_ok=True)
+            parent = os.path.dirname(resolved)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
 
         with open(resolved, "w", encoding="utf-8") as f:
             f.write(content)
@@ -294,6 +302,12 @@ def _write_edit(resolved: str, file_path: str, old_content: str, new_content: st
     except Exception as e:
         return f"Error writing file: {e}"
 
+    # Store diff for frontend diff view
+    PENDING_DIFFS[resolved] = {
+        "original": old_content,
+        "modified": new_content,
+    }
+
     # Generate compact diff for confirmation
     old_lines = old_content.split("\n")
     new_lines = new_content.split("\n")
@@ -338,6 +352,113 @@ def _edit_failed_hint(content: str, old_string: str, file_path: str) -> str:
         hint += "\nTip: The text might not exist in this file. Use grep_search or file_read to verify."
 
     return hint
+
+
+@tool(args_schema=FileEditBatchArgs)
+def file_edit_batch(edits: list) -> str:
+    """Apply multiple file edits atomically — all succeed or none are written.
+
+    Validates all edits in memory first. If any edit cannot be matched, the
+    entire batch is aborted with no files changed. This ensures consistency
+    across multi-file refactors.
+
+    Each edit uses the same 4-strategy matching as `file_edit` (exact, trimmed,
+    fuzzy, anchor).
+
+    Args:
+        edits: List of {file_path, old_string, new_string} edit operations.
+
+    Returns:
+        Summary of all edits applied, or an error showing which edit failed.
+    """
+    if not edits:
+        return "❌ Error: No edits provided."
+
+    # Normalize — edits may arrive as dicts or SingleEditItem objects
+    normalized = []
+    for item in edits:
+        if hasattr(item, "file_path"):
+            normalized.append((item.file_path, item.old_string, item.new_string))
+        elif isinstance(item, dict):
+            normalized.append((item["file_path"], item["old_string"], item["new_string"]))
+        else:
+            return f"❌ Error: Invalid edit item: {item!r}"
+
+    # Phase 1: validate + compute new contents (in memory only)
+    pending: list[tuple[str, str, str, str]] = []  # (resolved, file_path, old_content, new_content)
+
+    for idx, (file_path, old_string, new_string) in enumerate(normalized):
+        resolved = _resolve_path(file_path)
+        if not os.path.isfile(resolved):
+            return f"❌ Batch aborted at edit #{idx + 1}: File '{file_path}' not found. No files changed."
+
+        try:
+            with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception as e:
+            return f"❌ Batch aborted at edit #{idx + 1}: Cannot read '{file_path}': {e}. No files changed."
+
+        # Apply matching strategies (same as file_edit)
+        new_content = _apply_edit(content, old_string, new_string)
+        if new_content is None:
+            # Provide helpful hint
+            hint = _edit_failed_hint(content, old_string, file_path)
+            return (
+                f"❌ Batch aborted at edit #{idx + 1} ({file_path}):\n"
+                f"{hint}\nNo files changed."
+            )
+
+        pending.append((resolved, file_path, content, new_content))
+
+    # Phase 2: write all (in order — no partial rollback needed as phase 1 validated all)
+    results = []
+    for resolved, file_path, old_content, new_content in pending:
+        try:
+            with open(resolved, "w", encoding="utf-8") as f:
+                f.write(new_content)
+
+            PENDING_DIFFS[resolved] = {"original": old_content, "modified": new_content}
+
+            diff = list(difflib.unified_diff(
+                old_content.split("\n"), new_content.split("\n"), lineterm="", n=1
+            ))
+            added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+            removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+            results.append(f"  ✅ {file_path} (+{added}/-{removed} lines)")
+        except Exception as e:
+            results.append(f"  ⚠️ {file_path} — write failed: {e}")
+
+    return f"✅ Batch edit applied {len(results)}/{len(normalized)} files:\n" + "\n".join(results)
+
+
+def _apply_edit(content: str, old_string: str, new_string: str) -> str | None:
+    """Try all matching strategies. Returns new content or None if all fail."""
+    # Strategy 1: exact
+    count = content.count(old_string)
+    if count == 1:
+        return content.replace(old_string, new_string, 1)
+    if count > 1:
+        return None  # ambiguous
+
+    # Strategy 2: line-trimmed
+    matched_text, _ = _line_trimmed_match(content, old_string)
+    if matched_text is not None and content.count(matched_text) == 1:
+        adjusted = _adjust_indentation(old_string, matched_text, new_string)
+        return content.replace(matched_text, adjusted, 1)
+
+    # Strategy 3: levenshtein
+    matched_text, _ = _levenshtein_match(content, old_string)
+    if matched_text is not None and content.count(matched_text) == 1:
+        adjusted = _adjust_indentation(old_string, matched_text, new_string)
+        return content.replace(matched_text, adjusted, 1)
+
+    # Strategy 4: anchor
+    matched_text, _ = _block_anchor_match(content, old_string)
+    if matched_text is not None and content.count(matched_text) == 1:
+        adjusted = _adjust_indentation(old_string, matched_text, new_string)
+        return content.replace(matched_text, adjusted, 1)
+
+    return None
 
 
 @tool(args_schema=FileListArgs)
@@ -470,7 +591,4 @@ def _fmt_size(b: int) -> str:
 
 
 def _resolve_path(p: str) -> str:
-    """Resolve relative paths against workspace."""
-    if os.path.isabs(p):
-        return p
-    return os.path.join(config.WORKSPACE_DIR, p)
+    return resolve_tool_path(p)

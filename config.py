@@ -29,18 +29,30 @@ class Settings(BaseSettings):
         description="LLM backend: 'ollama' (self-hosted) or 'openai'."
     )
 
+    # Vector backend for semantic search
+    VECTOR_BACKEND: str = Field(
+        default="chroma",
+        description="Vector DB backend: 'chroma' (default, no Docker) or 'milvus' (Docker required)."
+    )
+
     # Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5-coder:14b"
+    OLLAMA_FAST_MODEL: str = ""  # empty = fall back to OLLAMA_MODEL
     EMBEDDING_MODEL: str = "nomic-embed-text"
 
     # OpenAI
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o"
+    OPENAI_FAST_MODEL: str = "gpt-4o-mini"  # cheaper/faster for subagents & summarization
 
     # ── Server ──────────────────────────────────────────────
     HOST: str = "0.0.0.0"
     PORT: int = Field(default=8000, ge=1, le=65535)
+    # Optional API key for server auth (empty = no auth required)
+    API_KEY: str = Field(default="", description="If set, clients must send this key in the 'x-api-key' header or 'api_key' field.")
+    # Hard timeout for a single agent run in seconds (0 = no timeout)
+    AGENT_TIMEOUT: int = Field(default=0, ge=0, description="Max seconds per agent run. 0 = unlimited.")
 
     # ── Tools ───────────────────────────────────────────────
     TOOL_TIMEOUT: int = Field(default=30, ge=5, le=300, description="Seconds per tool execution")
@@ -101,6 +113,22 @@ class Settings(BaseSettings):
             raise ValueError(f"PRUNE_PROTECT ({v}) must be >= PRUNE_MINIMUM ({minimum})")
         return v
 
+    @field_validator("OLLAMA_MODEL", "OPENAI_MODEL", "OLLAMA_FAST_MODEL", "OPENAI_FAST_MODEL")
+    @classmethod
+    def warn_unknown_model(cls, v, info):
+        """Emit a warning (not error) for models not in MODEL_CONTEXT_LIMITS."""
+        import warnings
+        if not v:
+            return v  # empty = use fallback
+        known = info.data.get("MODEL_CONTEXT_LIMITS", {})
+        if known and v not in known:
+            warnings.warn(
+                f"Model '{v}' is not in MODEL_CONTEXT_LIMITS — token-based compaction "
+                f"will use a default limit. Add it to MODEL_CONTEXT_LIMITS in .env if needed.",
+                stacklevel=2,
+            )
+        return v
+
 
 # ── Instantiate once (singleton) ────────────────────────────
 _settings = Settings()
@@ -111,15 +139,20 @@ BASE_DIR = _BASE_DIR
 DATA_DIR = _DATA_DIR
 STATIC_DIR = _BASE_DIR / "static"
 
+VECTOR_BACKEND = _settings.VECTOR_BACKEND
 LLM_PROVIDER = _settings.LLM_PROVIDER
 OLLAMA_BASE_URL = _settings.OLLAMA_BASE_URL
 OLLAMA_MODEL = _settings.OLLAMA_MODEL
+OLLAMA_FAST_MODEL = _settings.OLLAMA_FAST_MODEL
 EMBEDDING_MODEL = _settings.EMBEDDING_MODEL
 OPENAI_API_KEY = _settings.OPENAI_API_KEY
 OPENAI_MODEL = _settings.OPENAI_MODEL
+OPENAI_FAST_MODEL = _settings.OPENAI_FAST_MODEL
 
 HOST = _settings.HOST
 PORT = _settings.PORT
+API_KEY = _settings.API_KEY
+AGENT_TIMEOUT = _settings.AGENT_TIMEOUT
 
 TOOL_TIMEOUT = _settings.TOOL_TIMEOUT
 MAX_TERMINAL_OUTPUT = _settings.MAX_TERMINAL_OUTPUT

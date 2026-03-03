@@ -11,23 +11,8 @@ from fnmatch import fnmatch
 from langchain_core.tools import tool
 import config
 from agent.tools.truncation import truncate_output
+from agent.tools.utils import resolve_tool_path, IGNORE_DIRS, BINARY_EXT
 from models.tool_schemas import CodeSearchArgs, GrepSearchArgs, BatchReadArgs
-
-IGNORE_DIRS = {
-    "__pycache__", ".git", ".svn", "node_modules", ".venv", "venv",
-    "env", "dist", "build", ".next", ".cache", ".tox",
-    "target", "bin", "obj", ".idea", ".vscode",
-}
-
-BINARY_EXT = {
-    ".exe", ".dll", ".so", ".o", ".obj", ".bin", ".dat", ".db",
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".svg",
-    ".zip", ".tar", ".gz", ".rar", ".7z",
-    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt",
-    ".pyc", ".class", ".whl",
-    ".mp3", ".mp4", ".avi", ".wav",
-    ".slx", ".mdl", ".mat", ".fig", ".mexa64", ".mexw64",
-}
 
 # Check for ripgrep availability
 _RG_PATH = shutil.which(getattr(config, "RIPGREP_PATH", "rg"))
@@ -50,7 +35,7 @@ def _ripgrep_search(
         "--line-number",
         "--no-heading",
         "--color=never",
-        "--max-count=5",  # max matches per file
+        f"--max-count={max(10, max_results)}",  # per-file cap, respects caller's limit
         f"--max-columns=2000",
         "--max-columns-preview",
         "--sort=modified",  # most recently modified first (like OpenCode)
@@ -67,16 +52,30 @@ def _ripgrep_search(
 
     cmd.extend([query, search_dir])
 
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=config.TOOL_TIMEOUT,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    # Two attempts: normal timeout, then 2x timeout on first failure
+    for _attempt in range(2):
+        timeout = config.TOOL_TIMEOUT * (1 + _attempt)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                encoding="utf-8",
+                errors="replace",
+            )
+            break
+        except subprocess.TimeoutExpired:
+            if _attempt == 0:
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    f"[code_search] ripgrep timed out after {timeout}s — retrying with {timeout * 2}s"
+                )
+                continue
+            return None  # Both attempts timed out → fall back to Python
+        except (FileNotFoundError, OSError):
+            return None
+    else:
         return None
 
     if result.returncode > 1:  # 0 = matches, 1 = no matches, 2+ = error
@@ -295,8 +294,9 @@ def batch_read(
     if not file_paths:
         return "Error: No file paths provided."
 
-    if len(file_paths) > 10:
-        return "Error: Maximum 10 files per batch. Please split into smaller batches."
+    _BATCH_LIMIT = getattr(config, "BATCH_READ_LIMIT", 10)
+    if len(file_paths) > _BATCH_LIMIT:
+        return f"Error: Maximum {_BATCH_LIMIT} files per batch. Please split into smaller batches."
 
     results = []
 
@@ -333,6 +333,4 @@ def batch_read(
 
 
 def _resolve_path(p: str) -> str:
-    if os.path.isabs(p):
-        return p
-    return os.path.join(config.WORKSPACE_DIR, p)
+    return resolve_tool_path(p)

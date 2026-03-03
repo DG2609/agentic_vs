@@ -9,6 +9,18 @@ from agent.tools.truncation import truncate_output
 
 logger = logging.getLogger(__name__)
 
+# Check availability at module load — avoids wasting a tool call at runtime
+try:
+    from duckduckgo_search import DDGS as _DDGS
+    _DDGS_AVAILABLE = True
+except ImportError:
+    _DDGS = None  # type: ignore
+    _DDGS_AVAILABLE = False
+    logger.warning(
+        "[web_search] duckduckgo_search not installed — web_search tool will "
+        "report unavailable. Run: pip install duckduckgo_search"
+    )
+
 
 class WebSearchArgs(BaseModel):
     query: str = Field(description="Search query.")
@@ -31,16 +43,15 @@ def web_search(query: str, num_results: int = 5) -> str:
         query: Search query string.
         num_results: Number of results to return (1-20).
     """
-    try:
-        from duckduckgo_search import DDGS
-    except ImportError:
+    if not _DDGS_AVAILABLE:
         return (
-            "Error: duckduckgo_search not installed. "
-            "Run: pip install duckduckgo_search"
+            "Error: duckduckgo_search is not installed. "
+            "Run: pip install duckduckgo_search\n"
+            "Then restart the server."
         )
 
     try:
-        with DDGS() as ddgs:
+        with _DDGS() as ddgs:
             # Try default backend first
             results = list(ddgs.text(query, max_results=num_results))
             

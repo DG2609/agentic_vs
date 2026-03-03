@@ -46,6 +46,15 @@ def code_analyze(file_path: str) -> str:
         "",
     ]
 
+    _SUPPORTED = {".py", ".js", ".ts", ".jsx", ".tsx", ".c", ".cpp", ".h", ".java", ".m"}
+    if ext and ext not in _SUPPORTED:
+        output.append(
+            f"⚠️  Structural analysis not supported for '{ext}' files.\n"
+            f"   Supported: {', '.join(sorted(_SUPPORTED))}\n"
+            f"   Showing basic line stats only."
+        )
+        return truncate_output("\n".join(output))
+
     # Extract structure based on language
     functions = _extract_functions(content, ext)
     classes = _extract_classes(content, ext)
@@ -177,6 +186,5 @@ def _count_comments(lines: list[str], ext: str) -> int:
 
 
 def _resolve_path(p: str) -> str:
-    if os.path.isabs(p):
-        return p
-    return os.path.join(config.WORKSPACE_DIR, p)
+    from agent.tools.utils import resolve_tool_path
+    return resolve_tool_path(p)
