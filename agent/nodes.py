@@ -11,6 +11,7 @@ Upgraded with:
 """
 import os
 import json
+import logging
 from langchain_core.messages import (
     SystemMessage,
     HumanMessage,
@@ -21,6 +22,8 @@ from langchain_core.messages import (
 from models.state import AgentState
 import config
 from agent.tools.truncation import estimate_tokens
+
+logger = logging.getLogger(__name__)
 
 # LangGraph interrupt (human-in-the-loop). Available in LangGraph >= 0.2.57.
 try:
@@ -124,20 +127,58 @@ def _create_llm(streaming: bool = True, temperature: float = 0.3, fast: bool = F
         fast: If True, use the cheaper/faster model (for subagents, summarization).
               Falls back to the main model if no fast model is configured.
     """
-    if config.LLM_PROVIDER == "openai":
+    provider = config.LLM_PROVIDER
+
+    if provider == "openai":
         from langchain_openai import ChatOpenAI
-        model = (getattr(config, "OPENAI_FAST_MODEL", "") or config.OPENAI_MODEL
-                 if fast else config.OPENAI_MODEL)
+        model = (config.OPENAI_FAST_MODEL or config.OPENAI_MODEL) if fast else config.OPENAI_MODEL
         return ChatOpenAI(
             model=model,
             api_key=config.OPENAI_API_KEY,
             temperature=temperature,
             streaming=streaming,
         )
-    else:
+    elif provider == "anthropic":
+        from langchain_anthropic import ChatAnthropic
+        model = (config.ANTHROPIC_FAST_MODEL or config.ANTHROPIC_MODEL) if fast else config.ANTHROPIC_MODEL
+        return ChatAnthropic(
+            model=model,
+            api_key=config.ANTHROPIC_API_KEY,
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "google":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        model = (config.GOOGLE_FAST_MODEL or config.GOOGLE_MODEL) if fast else config.GOOGLE_MODEL
+        return ChatGoogleGenerativeAI(
+            model=model,
+            google_api_key=config.GOOGLE_API_KEY,
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "groq":
+        from langchain_groq import ChatGroq
+        model = (config.GROQ_FAST_MODEL or config.GROQ_MODEL) if fast else config.GROQ_MODEL
+        return ChatGroq(
+            model=model,
+            api_key=config.GROQ_API_KEY,
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "azure":
+        from langchain_openai import AzureChatOpenAI
+        model = (config.AZURE_OPENAI_FAST_MODEL or config.AZURE_OPENAI_MODEL) if fast else config.AZURE_OPENAI_MODEL
+        return AzureChatOpenAI(
+            azure_deployment=model,
+            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
+            api_key=config.AZURE_OPENAI_API_KEY,
+            api_version=config.AZURE_OPENAI_API_VERSION,
+            temperature=temperature,
+            streaming=streaming,
+        )
+    else:  # ollama (default)
         from langchain_ollama import ChatOllama
-        model = (getattr(config, "OLLAMA_FAST_MODEL", "") or config.OLLAMA_MODEL
-                 if fast else config.OLLAMA_MODEL)
+        model = (config.OLLAMA_FAST_MODEL or config.OLLAMA_MODEL) if fast else config.OLLAMA_MODEL
         return ChatOllama(
             model=model,
             base_url=config.OLLAMA_BASE_URL,
@@ -319,7 +360,10 @@ def _build_recovery_message(loop_type: str, messages: list) -> str:
     """Build a targeted recovery hint based on loop classification."""
     # Extract the repeated tool name for context
     recent = _get_recent_tool_calls(messages, DOOM_LOOP_MAX)
-    tool_name = recent[0][0][0] if recent and recent[0] else "unknown tool"
+    try:
+        tool_name = recent[0][0][0] if recent and recent[0] else "unknown tool"
+    except (IndexError, TypeError):
+        tool_name = "unknown tool"
 
     if loop_type == "tool_error":
         return (
@@ -348,8 +392,16 @@ def _build_recovery_message(loop_type: str, messages: list) -> str:
 # ─────────────────────────────────────────────────────────────
 def _get_model_limit() -> int:
     """Get token limit for current model."""
-    model_name = (config.OPENAI_MODEL if config.LLM_PROVIDER == "openai"
-                  else config.OLLAMA_MODEL)
+    provider = config.LLM_PROVIDER
+    model_map = {
+        "openai": "OPENAI_MODEL",
+        "anthropic": "ANTHROPIC_MODEL",
+        "google": "GOOGLE_MODEL",
+        "groq": "GROQ_MODEL",
+        "azure": "AZURE_OPENAI_MODEL",
+    }
+    attr = model_map.get(provider, "OLLAMA_MODEL")
+    model_name = getattr(config, attr, config.OLLAMA_MODEL)
     return config.MODEL_CONTEXT_LIMITS.get(model_name, 32768)
 
 
@@ -375,7 +427,7 @@ def _prune_tool_outputs(messages: list) -> list:
 
     # Calculate protected zone: last PRUNE_PROTECT tokens
     tail_tokens = 0
-    protect_from = len(messages)
+    protect_from = 0  # default: nothing protected, prune everything eligible
     for i in range(len(messages) - 1, -1, -1):
         tail_tokens += _msg_tokens(messages[i])
         if tail_tokens >= PRUNE_PROTECT:

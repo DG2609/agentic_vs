@@ -357,8 +357,11 @@ def _analyze_python(source: str, file_path: str, resolved: str, include_todos: b
     nested_fns = [f for f in functions if f["nesting"] > 4]
 
     total_issues = len(complex_fns) + len(long_fns) + len(param_fns) + len(nested_fns)
-    score = max(0, 100 - total_issues * 5 - len(todos) * 1)
-    grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D"
+    # Diminishing penalty: first issues cost more, avoids scores collapsing to 0
+    issue_penalty = min(80, total_issues * 5) if total_issues <= 8 else 40 + total_issues * 2
+    todo_penalty = min(10, len(todos) * 2)
+    score = max(0, 100 - int(issue_penalty) - todo_penalty)
+    grade = "A" if score >= 90 else "B" if score >= 75 else "C" if score >= 60 else "D" if score >= 40 else "F"
     report_parts.append(f"## Quality Score: {score}/100 (Grade {grade})")
     report_parts.append("")
 

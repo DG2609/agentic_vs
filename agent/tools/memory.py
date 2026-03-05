@@ -5,6 +5,7 @@ Uses SQLite (data/memory.db) for persistence. No embedding required —
 search is done via full-text LIKE matching on key, value, and tags.
 """
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -13,6 +14,8 @@ from langchain_core.tools import tool
 
 import config
 from models.tool_schemas import MemorySaveArgs, MemorySearchArgs, MemoryDeleteArgs, MemoryListArgs
+
+_logger = logging.getLogger(__name__)
 
 
 # ── DB setup ───────────────────────────────────────────────────
@@ -169,8 +172,9 @@ def memory_search(query: str, n_results: int = 5) -> str:
                     """,
                     (fts_query, n_results)
                 ).fetchall()
-            except Exception:
+            except Exception as fts_err:
                 # FTS failed → fallback to LIKE search
+                _logger.warning("[memory] FTS5 search failed (%s), falling back to LIKE", fts_err)
                 like = f"%{query}%"
                 rows = conn.execute(
                     """

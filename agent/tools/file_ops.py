@@ -473,7 +473,10 @@ def file_list(directory: str = "", max_depth: int = 3, show_size: bool = False) 
     Returns:
         Tree-like directory listing.
     """
-    target = directory or config.WORKSPACE_DIR
+    if directory:
+        target = resolve_tool_path(directory)
+    else:
+        target = config.WORKSPACE_DIR
     if not os.path.isdir(target):
         return f"Error: Directory '{target}' does not exist."
 
@@ -497,14 +500,13 @@ def glob_search(pattern: str, directory: str = "") -> str:
     Returns:
         List of matching files.
     """
-    target = directory or config.WORKSPACE_DIR
+    # Sandbox directory parameter to workspace boundary
+    if directory:
+        target = resolve_tool_path(directory)
+    else:
+        target = config.WORKSPACE_DIR
     if not os.path.isdir(target):
         return f"Error: Directory '{target}' does not exist."
-
-    # Prevent escaping workspace
-    # Python glob doesn't support root_dir until 3.10+, we assume modern python
-    # But to be safe with older python, use os.chdir or join carefully
-    # We'll use recursive glob from the target directory
 
     search_pattern = os.path.join(target, pattern)
     

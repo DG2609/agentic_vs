@@ -3,6 +3,7 @@ Tool: terminal_exec — run shell commands with timeout and output capture.
 All outputs go through universal truncation.
 """
 import asyncio
+import re
 import subprocess
 import time
 from langchain_core.tools import tool
@@ -24,20 +25,24 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
     Returns:
         Command stdout/stderr output, truncated if too long.
     """
-    # Block catastrophically destructive commands regardless of cwd
+    # Block catastrophically destructive commands regardless of cwd.
+    # Normalize whitespace so "rm  -rf  /" can't bypass "rm -rf /".
+    _normalized = re.sub(r"\s+", " ", command.strip()).lower()
     _DENIED_PATTERNS = [
-        "rm -rf /", "rm -rf /*", "rm -rf ~",  # Nuke root/home
-        "dd if=", "mkfs.",                      # Disk wipe / format
-        "> /dev/sda", "> /dev/nvme",            # Direct disk write
-        ":(){ :|:& };:",                        # Fork bomb
-        "chmod -R 777 /", "chmod -R 000 /",    # Permission nuke
+        (r"rm\s+(-\w*\s+)*-\w*r\w*f\w*\s+/",  "rm -rf /"),   # rm -rf / variants
+        (r"rm\s+(-\w*\s+)*-\w*f\w*r\w*\s+/",  "rm -rf /"),   # rm -fr / variants
+        (r"rm\s+(-\w*\s+)*-\w*r\w*f\w*\s+~",  "rm -rf ~"),   # home nuke
+        (r"\bdd\s+if\s*=",                     "dd if="),      # Disk wipe
+        (r"\bmkfs\.",                           "mkfs."),       # Disk format
+        (r">\s*/dev/[sn]",                     "> /dev/"),     # Direct disk write
+        (r":\(\)\s*\{\s*:\s*\|\s*:\s*&",       "fork bomb"),   # Fork bomb
+        (r"\bchmod\s+.*-R\s+[07]{3}\s+/",     "chmod nuke"),  # Permission nuke
     ]
-    cmd_lower = command.strip().lower()
-    for pattern in _DENIED_PATTERNS:
-        if pattern.lower() in cmd_lower:
+    for regex, label in _DENIED_PATTERNS:
+        if re.search(regex, _normalized):
             return (
                 f"❌ Command blocked: '{command}' matches a dangerous pattern "
-                f"({pattern!r}). This command is never allowed."
+                f"({label!r}). This command is never allowed."
             )
 
     # Sandbox cwd to workspace boundary

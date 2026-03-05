@@ -53,6 +53,18 @@ class LSPClient:
             return
 
         print(f"Starting LSP server: {' '.join(self.command)}")
+        # Build a clean environment: keep PATH and essential vars, strip secrets.
+        _KEEP_VARS = {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM",
+                       "SYSTEMROOT", "TEMP", "TMP", "COMSPEC",  # Windows
+                       "PYTHONPATH", "NODE_PATH", "VIRTUAL_ENV"}
+        _SECRET_SUBSTRINGS = {"KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL"}
+        clean_env = {}
+        for k, v in os.environ.items():
+            k_upper = k.upper()
+            if k_upper in _KEEP_VARS:
+                clean_env[k] = v
+            elif not any(s in k_upper for s in _SECRET_SUBSTRINGS):
+                clean_env[k] = v
         # shell=True on Windows only: required for PATH resolution of node/pyright executables.
         # Command is a trusted server binary, not user input.
         self.process = subprocess.Popen(
@@ -60,6 +72,7 @@ class LSPClient:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=clean_env,
             shell=True if os.name == 'nt' else False
         )
 
@@ -332,9 +345,9 @@ def _parse_uri(uri: str) -> str:
 
 
 def _ensure_open(client: LSPClient | None, file_path: str) -> str | None:
+    """Open file in LSP if not already open. Returns error string or None."""
     if client is None:
         return _lsp_unavailable_reason or "LSP server not available."
-    """Open file in LSP if not already, return content or error."""
     resolved = _resolve_path(file_path)
     if not os.path.isfile(resolved):
         return f"Error: File {file_path} not found"

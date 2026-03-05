@@ -24,9 +24,9 @@ class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # ── LLM Provider ────────────────────────────────────────
-    LLM_PROVIDER: Literal["ollama", "openai"] = Field(
+    LLM_PROVIDER: Literal["ollama", "openai", "anthropic", "google", "groq", "azure"] = Field(
         default="ollama",
-        description="LLM backend: 'ollama' (self-hosted) or 'openai'."
+        description="LLM backend: 'ollama', 'openai', 'anthropic', 'google', 'groq', or 'azure'."
     )
 
     # Vector backend for semantic search
@@ -45,6 +45,28 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o"
     OPENAI_FAST_MODEL: str = "gpt-4o-mini"  # cheaper/faster for subagents & summarization
+
+    # Anthropic
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    ANTHROPIC_FAST_MODEL: str = ""
+
+    # Google Gemini
+    GOOGLE_API_KEY: str = ""
+    GOOGLE_MODEL: str = "gemini-2.0-flash"
+    GOOGLE_FAST_MODEL: str = ""
+
+    # Groq
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_FAST_MODEL: str = ""
+
+    # Azure OpenAI
+    AZURE_OPENAI_API_KEY: str = ""
+    AZURE_OPENAI_ENDPOINT: str = ""
+    AZURE_OPENAI_MODEL: str = "gpt-4o"
+    AZURE_OPENAI_FAST_MODEL: str = ""
+    AZURE_OPENAI_API_VERSION: str = "2024-10-21"
 
     # ── Server ──────────────────────────────────────────────
     HOST: str = "0.0.0.0"
@@ -92,7 +114,23 @@ class Settings(BaseSettings):
         "gpt-4o-mini": 128000,
         "gpt-4-turbo": 128000,
         "gpt-3.5-turbo": 16384,
+        "claude-sonnet-4-20250514": 200000,
+        "claude-haiku-4-5-20251001": 200000,
+        "gemini-2.0-flash": 1048576,
+        "gemini-2.5-pro": 1048576,
+        "llama-3.3-70b-versatile": 131072,
     })
+
+    # ── Hooks ─────────────────────────────────────────────────
+    HOOKS_FILE: str = Field(default="", description="Path to hooks config JSON. Empty = no hooks.")
+
+    # ── GitHub / GitLab ───────────────────────────────────────
+    GITHUB_TOKEN: str = ""
+    GITLAB_TOKEN: str = ""
+    GITLAB_INSTANCE_URL: str = "https://gitlab.com"
+
+    # ── MCP Servers ───────────────────────────────────────────
+    MCP_SERVERS: dict = Field(default_factory=dict, description="MCP server definitions (JSON dict)")
 
     # ── Project rules ───────────────────────────────────────
     RULES_FILENAMES: list[str] = Field(
@@ -113,7 +151,29 @@ class Settings(BaseSettings):
             raise ValueError(f"PRUNE_PROTECT ({v}) must be >= PRUNE_MINIMUM ({minimum})")
         return v
 
-    @field_validator("OLLAMA_MODEL", "OPENAI_MODEL", "OLLAMA_FAST_MODEL", "OPENAI_FAST_MODEL")
+    @field_validator("COMPACTION_BUFFER")
+    @classmethod
+    def validate_compaction_buffer(cls, v, info):
+        """Warn if COMPACTION_BUFFER is larger than smallest model context limit."""
+        import warnings
+        limits = info.data.get("MODEL_CONTEXT_LIMITS", {})
+        if limits:
+            smallest = min(limits.values())
+            if v >= smallest:
+                warnings.warn(
+                    f"COMPACTION_BUFFER ({v}) >= smallest model context limit ({smallest}). "
+                    f"Token-based compaction may never trigger for small models.",
+                    stacklevel=2,
+                )
+        return v
+
+    @field_validator(
+        "OLLAMA_MODEL", "OPENAI_MODEL", "OLLAMA_FAST_MODEL", "OPENAI_FAST_MODEL",
+        "ANTHROPIC_MODEL", "ANTHROPIC_FAST_MODEL",
+        "GOOGLE_MODEL", "GOOGLE_FAST_MODEL",
+        "GROQ_MODEL", "GROQ_FAST_MODEL",
+        "AZURE_OPENAI_MODEL", "AZURE_OPENAI_FAST_MODEL",
+    )
     @classmethod
     def warn_unknown_model(cls, v, info):
         """Emit a warning (not error) for models not in MODEL_CONTEXT_LIMITS."""
@@ -149,6 +209,24 @@ OPENAI_API_KEY = _settings.OPENAI_API_KEY
 OPENAI_MODEL = _settings.OPENAI_MODEL
 OPENAI_FAST_MODEL = _settings.OPENAI_FAST_MODEL
 
+ANTHROPIC_API_KEY = _settings.ANTHROPIC_API_KEY
+ANTHROPIC_MODEL = _settings.ANTHROPIC_MODEL
+ANTHROPIC_FAST_MODEL = _settings.ANTHROPIC_FAST_MODEL
+
+GOOGLE_API_KEY = _settings.GOOGLE_API_KEY
+GOOGLE_MODEL = _settings.GOOGLE_MODEL
+GOOGLE_FAST_MODEL = _settings.GOOGLE_FAST_MODEL
+
+GROQ_API_KEY = _settings.GROQ_API_KEY
+GROQ_MODEL = _settings.GROQ_MODEL
+GROQ_FAST_MODEL = _settings.GROQ_FAST_MODEL
+
+AZURE_OPENAI_API_KEY = _settings.AZURE_OPENAI_API_KEY
+AZURE_OPENAI_ENDPOINT = _settings.AZURE_OPENAI_ENDPOINT
+AZURE_OPENAI_MODEL = _settings.AZURE_OPENAI_MODEL
+AZURE_OPENAI_FAST_MODEL = _settings.AZURE_OPENAI_FAST_MODEL
+AZURE_OPENAI_API_VERSION = _settings.AZURE_OPENAI_API_VERSION
+
 HOST = _settings.HOST
 PORT = _settings.PORT
 API_KEY = _settings.API_KEY
@@ -160,6 +238,14 @@ WORKSPACE_DIR = _settings.WORKSPACE_DIR
 MAX_OUTPUT_LINES = _settings.MAX_OUTPUT_LINES
 MAX_OUTPUT_BYTES = _settings.MAX_OUTPUT_BYTES
 RIPGREP_PATH = _settings.RIPGREP_PATH
+
+HOOKS_FILE = _settings.HOOKS_FILE
+
+GITHUB_TOKEN = _settings.GITHUB_TOKEN
+GITLAB_TOKEN = _settings.GITLAB_TOKEN
+GITLAB_INSTANCE_URL = _settings.GITLAB_INSTANCE_URL
+
+MCP_SERVERS = _settings.MCP_SERVERS
 
 MAX_MESSAGES_BEFORE_SUMMARY = _settings.MAX_MESSAGES_BEFORE_SUMMARY
 COMPACTION_BUFFER = _settings.COMPACTION_BUFFER

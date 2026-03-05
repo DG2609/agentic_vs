@@ -107,8 +107,13 @@ def _resolve_local_module(name: str, current_file: str, workspace: str) -> str |
         module_part = name.lstrip(".")
 
         base_dir = current_dir
+        ws_real = os.path.realpath(workspace)
         for _ in range(dots - 1):
-            base_dir = os.path.dirname(base_dir)
+            parent = os.path.dirname(base_dir)
+            # Prevent escaping workspace boundary
+            if not os.path.realpath(parent).startswith(ws_real):
+                return None
+            base_dir = parent
 
         if module_part:
             parts = module_part.split(".")
@@ -157,15 +162,18 @@ def _build_graph(
     unresolved = {}  # name → classification
     visited = set()
     circular = []
+    # Track the ancestor chain per BFS path for indirect cycle detection
+    ancestors: dict[str, set[str]] = {}  # file → set of all ancestors in its path
 
-    queue = [(entry, 0)]
+    queue = [(entry, 0, set())]  # (file, depth, ancestor_set)
 
     while queue:
-        current_file, depth = queue.pop(0)
+        current_file, depth, current_ancestors = queue.pop(0)
 
         if current_file in visited:
             continue
         visited.add(current_file)
+        ancestors[current_file] = current_ancestors
 
         # Read file
         try:
@@ -186,11 +194,14 @@ def _build_graph(
             if classification == "local":
                 resolved = _resolve_local_module(mod_name, current_file, workspace)
                 if resolved:
-                    # Cycle detection
-                    if resolved in visited and depth < max_depth:
+                    # Cycle detection: check both visited set AND ancestor chain
+                    if resolved in current_ancestors:
+                        # Indirect cycle: A→B→...→current→resolved where resolved is an ancestor
+                        circular.append((current_file, resolved))
+                    elif resolved in visited and depth < max_depth:
                         circular.append((current_file, resolved))
                     elif depth < max_depth:
-                        queue.append((resolved, depth + 1))
+                        queue.append((resolved, depth + 1, current_ancestors | {current_file}))
                     edges.append((current_file, resolved, mod_name))
                     node_imports.append({"name": mod_name, "type": classification, "resolved": resolved})
                 else:

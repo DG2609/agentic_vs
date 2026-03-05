@@ -75,8 +75,6 @@ def _ripgrep_search(
             return None  # Both attempts timed out → fall back to Python
         except (FileNotFoundError, OSError):
             return None
-    else:
-        return None
 
     if result.returncode > 1:  # 0 = matches, 1 = no matches, 2+ = error
         return None

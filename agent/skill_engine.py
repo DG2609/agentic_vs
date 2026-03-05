@@ -164,8 +164,11 @@ def _process_body(body: str, arguments: str = "", cwd: str = "") -> str:
         except Exception as e:
             return f"```\n$ {cmd}\n(error: {e})\n```"
 
+    # Substitute $ARGUMENTS BEFORE executing shell commands so that
+    # !`echo $ARGUMENTS` gets the literal text, not a shell-injectable string.
+    safe_args = arguments or "(no additional arguments)"
+    body = body.replace("$ARGUMENTS", safe_args)
     body = _SHELL_RE.sub(_run_cmd, body)
-    body = body.replace("$ARGUMENTS", arguments or "(no additional arguments)")
     return body
 
 

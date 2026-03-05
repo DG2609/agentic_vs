@@ -7,7 +7,7 @@ and specialized system prompt.
 """
 import logging
 from langchain_core.tools import tool
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 
 import config
 from agent.tools.truncation import truncate_output
@@ -49,7 +49,6 @@ async def _run_subagent(
             return response.content or "(subagent completed with no output)"
 
         # Execute tool calls
-        from langchain_core.messages import ToolMessage
         for tc in response.tool_calls:
             tool_name = tc["name"]
             tool_args = tc["args"]

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(pip install:*)",
+      "Bash(find:*)",
+      "WebSearch",
+      "WebFetch(domain:gist.github.com)"
+    ]
+  }
+}

@@ -114,6 +114,11 @@ def _save_full_output(text: str) -> str:
 
     try:
         filepath.write_text(text, encoding="utf-8", errors="replace")
+        # Restrict permissions on Unix (owner-only read/write)
+        try:
+            filepath.chmod(0o600)
+        except OSError:
+            pass  # Windows doesn't support Unix permissions
     except Exception:
         return "(failed to save full output)"
 
@@ -135,5 +140,21 @@ def cleanup_old_outputs():
 
 
 def estimate_tokens(text: str) -> int:
-    """Estimate token count from text (rough: ~4 chars per token)."""
-    return max(0, round(len(text) / 4))
+    """Estimate token count from text.
+
+    Uses tiktoken for accuracy if available, otherwise a heuristic
+    that counts words + punctuation (more accurate than simple len/4).
+    """
+    if not text:
+        return 0
+    try:
+        import tiktoken
+        enc = tiktoken.encoding_for_model("gpt-4o")
+        return len(enc.encode(text))
+    except Exception:
+        pass
+    # Heuristic: ~0.75 tokens per word for English/code, plus punctuation tokens
+    words = text.split()
+    # Code has many single-char tokens (brackets, operators), count them
+    non_alnum = sum(1 for c in text if not c.isalnum() and not c.isspace())
+    return max(1, len(words) + non_alnum // 2)

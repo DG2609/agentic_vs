@@ -18,9 +18,12 @@ Upgraded with:
   code quality, dependency graph tools
 """
 
+import asyncio
+import logging
 from functools import partial
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_core.messages import ToolMessage
 from models.state import AgentState
 from agent.nodes import (
     agent_node, summarize_node, get_llm,
@@ -60,7 +63,13 @@ from agent.tools.dep_graph import dep_graph
 from agent.tools.context_build import context_build
 from agent.tools.skills import skill_invoke, skill_list, skill_create
 from agent.skill_loader import load_skills as _load_skills
+from agent.hooks import (
+    run_pre_hooks, run_post_hooks,
+    load_hooks_from_file, PRE_TOOL_HOOKS, POST_TOOL_HOOKS,
+)
 import config
+
+logger = logging.getLogger(__name__)
 
 # ── Core tool set (used for skill dedup) ────────────────────
 _CORE_TOOLS = [
@@ -128,6 +137,76 @@ CODER_TOOLS = PLANNER_TOOLS + [
 ALL_TOOLS = list({t.name: t for t in PLANNER_TOOLS + CODER_TOOLS}.values())
 
 
+# ── Load hooks from config ───────────────────────────────────
+if config.HOOKS_FILE:
+    load_hooks_from_file(config.HOOKS_FILE)
+
+
+class HookedToolNode:
+    """Wraps LangGraph ToolNode with pre/post hook support.
+
+    - Before each tool call: runs matching pre-hooks (can block or modify args)
+    - After each tool call: runs matching post-hooks (can modify output)
+    """
+
+    def __init__(self, tools: list):
+        self._inner = ToolNode(tools)
+        self._has_hooks = bool(PRE_TOOL_HOOKS or POST_TOOL_HOOKS)
+
+    async def __call__(self, state):
+        if not self._has_hooks:
+            return await self._inner.ainvoke(state)
+
+        # Process tool calls with hooks
+        messages = list(state["messages"]) if isinstance(state, dict) else list(state.messages)
+        last_msg = messages[-1] if messages else None
+
+        if not last_msg or not getattr(last_msg, "tool_calls", None):
+            return await self._inner.ainvoke(state)
+
+        # Run pre-hooks — check for blocks
+        for tc in last_msg.tool_calls:
+            tool_name = tc.get("name", "")
+            tool_args = tc.get("args", {})
+            pre_result = await run_pre_hooks(tool_name, tool_args)
+
+            if pre_result.block:
+                # Return a blocked message instead of executing
+                blocked_msg = ToolMessage(
+                    content=f"[BLOCKED by hook] {pre_result.reason}",
+                    tool_call_id=tc.get("id", ""),
+                    name=tool_name,
+                )
+                return {"messages": [blocked_msg]}
+
+            # Modify args if hook requested
+            if pre_result.modified_args is not None:
+                tc["args"] = pre_result.modified_args
+
+        # Execute tools normally
+        result = await self._inner.ainvoke(state)
+
+        # Run post-hooks
+        result_messages = result.get("messages", []) if isinstance(result, dict) else []
+        modified_messages = []
+        for msg in result_messages:
+            if isinstance(msg, ToolMessage):
+                tool_name = getattr(msg, "name", "")
+                post_result = await run_post_hooks(tool_name, {}, getattr(msg, "content", ""))
+                if post_result.modified_output is not None:
+                    msg = ToolMessage(
+                        content=post_result.modified_output,
+                        tool_call_id=msg.tool_call_id,
+                        name=tool_name,
+                    )
+            modified_messages.append(msg)
+
+        if modified_messages:
+            result["messages"] = modified_messages
+
+        return result
+
+
 def should_compact(state: AgentState) -> str:
     """Check if conversation needs compaction via token estimation or message count."""
     # Token-based check (primary)
@@ -160,7 +239,8 @@ def build_graph(checkpointer=None):
 
     # ── Add nodes ───────────────────────────────────────────
     graph.add_node("agent", partial(agent_node, llm_planner=llm_planner, llm_coder=llm_coder))
-    graph.add_node("tools", ToolNode(ALL_TOOLS))
+    tool_node = HookedToolNode(ALL_TOOLS) if (PRE_TOOL_HOOKS or POST_TOOL_HOOKS) else ToolNode(ALL_TOOLS)
+    graph.add_node("tools", tool_node)
     graph.add_node("check_compact", lambda state: state)  # passthrough for routing
     graph.add_node("summarize", summarize_node)
 

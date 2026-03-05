@@ -174,8 +174,9 @@ def _count_comments(lines: list[str], ext: str) -> int:
                     in_block = False
             elif stripped.startswith("//"):
                 count += 1
-            elif stripped.startswith("/*"):
+            elif "/*" in stripped:
                 count += 1
+                # Only enter block mode if closing */ is NOT on the same line
                 if "*/" not in stripped:
                     in_block = True
         elif ext == ".m":

@@ -230,7 +230,9 @@ def _format_summary(framework: str, stats: dict, returncode: int, duration: floa
     status = "✅ PASSED" if returncode == 0 else "❌ FAILED"
 
     parts = [f"{status} ({framework}) — {duration:.1f}s"]
-    if total > 0:
+    if total == 0 and returncode != 0:
+        parts.append("  (could not parse test output — check raw output below)")
+    elif total > 0:
         parts.append(
             f"  {stats['passed']} passed, {stats['failed']} failed"
             + (f", {stats['errors']} errors" if stats.get('errors') else "")
