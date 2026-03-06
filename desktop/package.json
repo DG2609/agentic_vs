@@ -1,0 +1,91 @@
+{
+  "name": "shadowdev-desktop",
+  "version": "0.4.0",
+  "description": "ShadowDev Agentic IDE — Desktop App",
+  "main": "electron.js",
+  "author": "ShadowDev Contributors",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "NODE_ENV=development electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "electron-log": "^5.2.0",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "dev.shadowdev.ide",
+    "productName": "ShadowDev",
+    "copyright": "Copyright © 2026 ShadowDev Contributors",
+    "icon": "assets/icon",
+    "files": [
+      "electron.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../",
+        "to": "shadowdev",
+        "filter": [
+          "agent/**",
+          "models/**",
+          "skills/**",
+          "server/**",
+          "indexer/**",
+          "cli.py",
+          "main.py",
+          "config.py",
+          "requirements.txt",
+          "!**/__pycache__",
+          "!**/node_modules",
+          "!**/env",
+          "!**/data"
+        ]
+      },
+      {
+        "from": "../frontend/out",
+        "to": "web",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "darkModeSupport": true
+    },
+    "linux": {
+      "target": [{ "target": "AppImage", "arch": ["x64"] }],
+      "icon": "assets/icon.png",
+      "category": "Development"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "shadowdev",
+      "repo": "shadowdev"
+    }
+  }
+}

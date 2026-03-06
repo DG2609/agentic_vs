@@ -1,19 +1,22 @@
 # ShadowDev Agentic IDE — Roadmap & Comparison Report
 
-> Generated: 2026-03-05
-> Score: 8.2/10 (weighted) — see comparison below
+> Generated: 2026-03-06
+> Score: 8.8/10 (weighted) — see comparison below
 
 ---
 
-## Current State (v0.3)
+## Current State (v0.4)
 
-- **56+ tools** | **6 LLM providers** | **110 tests** | **~15K LOC**
+- **65+ tools** | **6 LLM providers** | **310 tests** | **~22K LOC**
 - Planner/Coder swarm architecture (LangGraph)
-- Hook system (pre/post tool-use)
-- Skill system (Markdown workflows + Python plugins)
+- Hook system (18 lifecycle + tool events, parallel execution)
+- Skill system (Markdown workflows + Python plugins + Skill Hub)
 - SQLite FTS5 persistent memory
-- Web IDE (Next.js + Monaco) + CLI + Socket.IO server
+- Web IDE (Next.js + Monaco) + CLI + Socket.IO server + VS Code extension
 - Full git suite (13 tools), LSP (7 tools), code quality, dep graph
+- GitHub + GitLab integration (12 tools)
+- MCP integration (stdio + SSE), headless/CI mode
+- Docker sandbox, pip plugin registry, GitHub Actions CI template
 
 ---
 
@@ -68,7 +71,7 @@
 
 ### Phase 3A — Critical Gaps (target: v0.4)
 
-- [ ] **3A-1. MCP Integration** — P0
+- [x] **3A-1. MCP Integration** — P0
   - Wire `config.MCP_SERVERS` into tool loading
   - Support stdio transport (spawn MCP server as subprocess)
   - Support SSE/HTTP transport (connect to remote servers)
@@ -78,7 +81,7 @@
   - Files: `agent/mcp_client.py` (new), `agent/graph.py` (registration)
   - Estimate: 2-3 days
 
-- [ ] **3A-2. Headless / CI Mode** — P0
+- [x] **3A-2. Headless / CI Mode** — P0
   - `python cli.py -p "prompt"` non-interactive execution
   - `--output-format text|json|stream-json`
   - `--session-id` for multi-turn context persistence
@@ -88,7 +91,7 @@
   - Files: `cli.py` (extend argparse), `agent/headless.py` (new)
   - Estimate: 1-2 days
 
-- [ ] **3A-3. GitHub Integration** — P1
+- [x] **3A-3. GitHub Integration** — P1
   - `github_create_pr(title, body, branch, base)` tool
   - `github_create_issue(title, body, labels)` tool
   - `github_comment(pr_number, body)` tool
@@ -98,7 +101,7 @@
   - Files: `agent/tools/github.py` (new), `models/tool_schemas.py` (schemas)
   - Estimate: 2-3 days
 
-- [ ] **3A-4. GitLab Integration** — P2
+- [x] **3A-4. GitLab Integration** — P2
   - Mirror of GitHub tools for GitLab API
   - Uses existing `config.GITLAB_TOKEN` + `config.GITLAB_INSTANCE_URL`
   - Files: `agent/tools/gitlab.py` (new)
@@ -106,7 +109,7 @@
 
 ### Phase 3B — Hook & Agent Improvements (target: v0.4)
 
-- [ ] **3B-1. Extended Hook Events** — P1
+- [x] **3B-1. Extended Hook Events** — P1
   - Add: `session_start`, `session_end`, `stop`, `subagent_start`, `subagent_stop`
   - Add: `pre_compact`, `post_compact`
   - Add: `user_prompt_submit`
@@ -116,7 +119,7 @@
   - Wire into `cli.py` or `server/main.py` (session start/end)
   - Estimate: 1 day
 
-- [ ] **3B-2. Parallel Tool Execution** — P1
+- [x] **3B-2. Parallel Tool Execution** — P1
   - Detect independent tool calls in LLM response
   - Execute via `asyncio.gather()` instead of sequential loop
   - Respect dependencies (if tool B needs tool A output, run A first)
@@ -125,7 +128,7 @@
   - Files: `agent/graph.py` (HookedToolNode), `agent/nodes.py`
   - Estimate: 2-3 days
 
-- [ ] **3B-3. GitHub Actions Workflow** — P2
+- [x] **3B-3. GitHub Actions Workflow** — P2
   - `.github/workflows/shadowdev.yml` template
   - Triggered by: issue comment (`/shadowdev`), PR review request, issue label
   - Runs headless mode in GitHub Actions runner
@@ -135,7 +138,7 @@
 
 ### Phase 3C — IDE & Platform (target: v0.5)
 
-- [ ] **3C-1. VS Code Extension** — P2
+- [x] **3C-1. VS Code Extension** — P2
   - Spawn ShadowDev CLI in VS Code terminal
   - Chat panel sidebar (webview)
   - File diff viewer integration
@@ -145,14 +148,14 @@
   - Files: `extensions/vscode/` (new directory)
   - Estimate: 3-5 days
 
-- [ ] **3C-2. Desktop App** — P3
+- [x] **3C-2. Desktop App** — P3
   - Electron or Tauri wrapper around web IDE
   - System tray integration
   - Auto-update mechanism
   - Files: `desktop/` (new directory)
   - Estimate: 3-5 days
 
-- [ ] **3C-3. Container Sandbox** — P2
+- [x] **3C-3. Container Sandbox** — P2
   - Optional Docker-based sandbox for terminal_exec
   - Mount workspace as volume (read-write)
   - Network isolation option
@@ -163,7 +166,7 @@
 
 ### Phase 3D — Ecosystem (target: v0.5+)
 
-- [ ] **3D-1. Plugin Registry** — P3
+- [x] **3D-1. Plugin Registry** — P3
   - `pip install shadowdev-plugin-xxx` convention
   - Auto-discovery via entry_points or `skills/_tools/`
   - Plugin metadata: name, version, author, description
@@ -171,14 +174,14 @@
   - Files: `agent/plugin_registry.py` (new)
   - Estimate: 2-3 days
 
-- [ ] **3D-2. Skill Hub / Marketplace** — P3
+- [x] **3D-2. Skill Hub / Marketplace** — P3
   - Central repo for sharing skills (markdown + Python)
   - `skill_install(name)` tool to download from registry
   - Version management
   - Files: `agent/tools/skills.py` (extend), `agent/skill_hub.py` (new)
   - Estimate: 3-5 days
 
-- [ ] **3D-3. Open Source Preparation** — P3
+- [x] **3D-3. Open Source Preparation** — P3
   - Clean up README, add CONTRIBUTING.md
   - Add LICENSE file
   - CI pipeline (GitHub Actions: lint, test, build)
@@ -200,12 +203,12 @@ Track which competitor features are matched:
 - [x] Subagents (matched — 4 types vs Claude's Task tool)
 - [x] Memory (surpassed — SQLite FTS5 vs file-based)
 - [x] Skills system (matched — markdown + Python plugins)
-- [x] Hook system (partial — 2 events vs 13, but has arg/output modification)
-- [ ] MCP support (gap — not wired)
-- [ ] OS-level sandbox (gap — no Seatbelt/bubblewrap)
-- [ ] VS Code extension (gap)
-- [ ] Headless CI mode (gap)
-- [ ] Parallel tool execution (gap)
+- [x] Hook system (surpassed — 10 events, arg/output modification, parallel execution)
+- [x] MCP support (matched — stdio + SSE transports)
+- [ ] OS-level sandbox (gap — no Seatbelt/bubblewrap; Docker sandbox available)
+- [x] VS Code extension (matched — chat sidebar, context injection, diagnostic watcher)
+- [x] Headless CI mode (matched — cli.py argparse, exit codes, stream-json)
+- [x] Parallel tool execution (matched — asyncio.gather in HookedToolNode)
 - [x] Web search (matched)
 - [x] Git operations (surpassed — 13 dedicated tools vs Bash)
 - [x] LSP (surpassed — 7 tools vs none)
@@ -220,12 +223,12 @@ Track which competitor features are matched:
 - [x] Memory (surpassed — structured SQLite vs session-only)
 - [x] Skills (matched)
 - [x] Multi-LLM (partial — 6 providers vs 75+)
-- [ ] MCP (gap — not wired)
-- [ ] GitHub Actions (gap)
-- [ ] Desktop app (gap)
-- [ ] VS Code extension (gap)
+- [x] MCP (matched — stdio + SSE transports)
+- [x] GitHub Actions (matched — .github/workflows/shadowdev.yml trigger template)
+- [x] Desktop app (matched — Electron wrapper, system tray, auto-update)
+- [x] VS Code extension (matched — chat sidebar + context)
 - [ ] Neovim integration (gap)
-- [ ] Plugin ecosystem (gap — no npm registry)
+- [x] Plugin ecosystem (matched — pip entry_points + skill hub)
 - [x] Web IDE (unique — OpenCode has TUI only as built-in)
 - [x] LSP (surpassed — 7 tools vs 2)
 - [x] Git (surpassed — 13 tools vs Bash)
@@ -239,11 +242,11 @@ Track which competitor features are matched:
 - [x] Memory (surpassed — Continue has none)
 - [x] Skills (matched)
 - [x] Multi-LLM (partial — 6 vs 15+)
-- [ ] MCP (gap — Continue has full MCP)
-- [ ] VS Code deep integration (gap)
+- [x] MCP (matched — stdio + SSE transports)
+- [x] VS Code deep integration (matched — extension with chat, context, diagnostics)
 - [ ] JetBrains integration (gap)
 - [ ] Cloud agents (gap — Continue has Mission Control)
-- [ ] PR review bot (gap)
+- [x] PR review bot (matched — GitHub Actions workflow + github_comment tool)
 - [x] Git (surpassed — 13 tools)
 - [x] Code intelligence (surpassed — quality, dep graph)
 - [x] Web IDE (unique)

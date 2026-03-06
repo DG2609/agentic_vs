@@ -22,6 +22,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from agent.graph import build_graph
+from agent.hooks import run_lifecycle_hook, LIFECYCLE_HOOKS
 from langgraph.checkpoint.memory import MemorySaver
 
 # Compile graph with in-memory persistence
@@ -139,7 +140,11 @@ async def chat_loop():
     global current_agent_mode
     session = PromptSession(style=style, bottom_toolbar=bottom_toolbar, key_bindings=bindings)
     thread_id = str(uuid.uuid4())
-    
+
+    # ── Lifecycle: session_start ─────────────────────────────
+    if LIFECYCLE_HOOKS:
+        await run_lifecycle_hook("session_start", {"thread_id": thread_id})
+
     # ── Styled Banner ───────────────────────────────────────
     model = config.OLLAMA_MODEL if config.LLM_PROVIDER == "ollama" else config.OPENAI_MODEL
     provider = config.LLM_PROVIDER.upper()
@@ -189,11 +194,28 @@ async def chat_loop():
             if not input_text.strip():
                 continue
 
+            # ── Lifecycle: user_prompt_submit ────────────────
+            if LIFECYCLE_HOOKS:
+                modified = await run_lifecycle_hook(
+                    "user_prompt_submit",
+                    {"prompt": input_text, "agent": active_agent_override},
+                )
+                if modified:
+                    input_text = modified
+
             await run_agent(input_text, thread_id, active_agent_override)
+
+            # ── Lifecycle: stop ──────────────────────────────
+            if LIFECYCLE_HOOKS:
+                await run_lifecycle_hook("stop", {"thread_id": thread_id})
             
         except (KeyboardInterrupt, EOFError):
             console.print("\n[yellow]Goodbye! ShadowDev powering down...[/yellow]")
             break
+
+    # ── Lifecycle: session_end ───────────────────────────────
+    if LIFECYCLE_HOOKS:
+        await run_lifecycle_hook("session_end", {"thread_id": thread_id})
 
 
 # ── Agent runner ────────────────────────────────────────────
@@ -393,4 +415,65 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None):
 
 
 if __name__ == "__main__":
-    asyncio.run(chat_loop())
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="shadowdev",
+        description="ShadowDev — AI-powered coding assistant",
+    )
+    parser.add_argument(
+        "-p", "--prompt",
+        metavar="PROMPT",
+        help="Run in headless/CI mode with this prompt then exit.",
+    )
+    parser.add_argument(
+        "--session-id",
+        metavar="ID",
+        help="Session ID for multi-turn context persistence (default: new UUID).",
+    )
+    parser.add_argument(
+        "--agent",
+        choices=["planner", "coder"],
+        default="planner",
+        help="Starting agent mode (default: planner).",
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=["text", "json", "stream-json"],
+        default="text",
+        help="Output format for headless mode (default: text).",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=0,
+        metavar="SECONDS",
+        help="Max execution time in seconds (0 = no limit, default: 0).",
+    )
+    parser.add_argument(
+        "--allowed-tools",
+        metavar="TOOLS",
+        help="Comma-separated whitelist of tool names (default: all tools).",
+    )
+
+    args = parser.parse_args()
+
+    if args.prompt:
+        # ── Headless / CI mode ───────────────────────────────
+        from agent.headless import run_headless, print_result
+
+        allowed = [t.strip() for t in args.allowed_tools.split(",")] if args.allowed_tools else None
+
+        result = asyncio.run(run_headless(
+            prompt=args.prompt,
+            session_id=args.session_id,
+            agent=args.agent,
+            output_format=args.output_format,
+            timeout=args.timeout or None,
+            allowed_tools=allowed,
+        ))
+        print_result(result, args.output_format)
+        sys.exit(result.exit_code)
+    else:
+        # ── Interactive mode ─────────────────────────────────
+        asyncio.run(chat_loop())

@@ -1,11 +1,13 @@
 """
 Tool: terminal_exec — run shell commands with timeout and output capture.
 All outputs go through universal truncation.
+
+When config.SANDBOX_ENABLED=True and Docker is available, commands run inside
+an isolated container (network isolation, memory/CPU limits, no privilege escalation).
+Falls back to direct execution if Docker is unavailable.
 """
-import asyncio
 import re
 import subprocess
-import time
 from langchain_core.tools import tool
 import config
 from agent.tools.truncation import truncate_output
@@ -55,6 +57,15 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
         work_dir = config.WORKSPACE_DIR
     max_timeout = timeout if timeout > 0 else config.TOOL_TIMEOUT
 
+    # ── Docker sandbox (when enabled and available) ────────────
+    if config.SANDBOX_ENABLED:
+        from agent.sandbox import SANDBOX_AVAILABLE, sandbox_exec
+        if SANDBOX_AVAILABLE:
+            raw = sandbox_exec(command, work_dir, max_timeout)
+            return truncate_output(raw)
+        # else: fall through to direct execution with a warning note
+
+    # ── Direct execution ───────────────────────────────────────
     try:
         # shell=True: command comes from the LLM/user request, not untrusted input.
         # Sandboxed via work_dir (workspace-bound cwd) and configurable timeout.

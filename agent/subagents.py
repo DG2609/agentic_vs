@@ -29,6 +29,10 @@ async def _run_subagent(
 ) -> str:
     """Run a subagent loop: LLM → tool calls → LLM → ... → final text."""
     from agent.nodes import _create_llm, _invoke_with_retry, _repair_tool_calls
+    from agent.hooks import run_lifecycle_hook, LIFECYCLE_HOOKS
+
+    if LIFECYCLE_HOOKS:
+        await run_lifecycle_hook("subagent_start", {"task": task[:200]})
 
     # Use fast model for subagents — they do search/exploration, not deep reasoning
     llm = _create_llm(streaming=False, temperature=0.2, fast=True)
@@ -46,7 +50,10 @@ async def _run_subagent(
 
         # If no tool calls, return the text response
         if not response.tool_calls:
-            return response.content or "(subagent completed with no output)"
+            final = response.content or "(subagent completed with no output)"
+            if LIFECYCLE_HOOKS:
+                await run_lifecycle_hook("subagent_stop", {"task": task[:200], "result": final[:200]})
+            return final
 
         # Execute tool calls
         for tc in response.tool_calls:
@@ -68,7 +75,10 @@ async def _run_subagent(
 
             messages.append(ToolMessage(content=result_str, tool_call_id=tool_id))
 
-    return "(subagent reached max steps)"
+    result_text = "(subagent reached max steps)"
+    if LIFECYCLE_HOOKS:
+        await run_lifecycle_hook("subagent_stop", {"task": task[:200], "result": result_text[:200]})
+    return result_text
 
 
 # ─────────────────────────────────────────────────────────────

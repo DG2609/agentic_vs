@@ -1,0 +1,257 @@
+# ShadowDev Agentic IDE — GitHub Actions Integration
+#
+# Triggers:
+#   1. Issue comment:        /shadowdev <prompt>
+#   2. PR review request:   request a review from "shadowdev-bot" (user/team)
+#   3. Issue label added:   label named "shadowdev" applied to an issue
+#
+# The agent runs in headless mode, makes changes (if any), and pushes a branch
+# or commits to the PR branch, then posts a comment with the result.
+#
+# Required secrets (set in repo Settings → Secrets and variables → Actions):
+#   SHADOWDEV_LLM_PROVIDER  - "openai", "anthropic", "ollama", etc.
+#   SHADOWDEV_OPENAI_KEY    - if using OpenAI
+#   SHADOWDEV_ANTHROPIC_KEY - if using Anthropic
+#   SHADOWDEV_GITHUB_TOKEN  - PAT with repo + PR write access (or use GITHUB_TOKEN)
+#
+# Optional:
+#   SHADOWDEV_MODEL         - override default model
+#   SHADOWDEV_TIMEOUT       - max seconds per run (default 300)
+
+name: ShadowDev Agent
+
+on:
+  # Trigger on /shadowdev command in issue/PR comments
+  issue_comment:
+    types: [created]
+
+  # Trigger when "shadowdev" label is applied to an issue
+  issues:
+    types: [labeled]
+
+  # Trigger on PR review requests targeting "shadowdev-bot"
+  pull_request:
+    types: [review_requested]
+
+# Prevent concurrent runs for the same issue/PR
+concurrency:
+  group: shadowdev-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  shadowdev:
+    name: Run ShadowDev Agent
+    runs-on: ubuntu-latest
+
+    # Only run if conditions match
+    if: |
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '/shadowdev')) ||
+      (github.event_name == 'issues' && github.event.label.name == 'shadowdev') ||
+      (github.event_name == 'pull_request' && contains(toJson(github.event.pull_request.requested_reviewers), 'shadowdev'))
+
+    permissions:
+      contents: write        # push commits / branches
+      issues: write          # post comments
+      pull-requests: write   # post PR comments, create PRs
+
+    steps:
+      # ── Checkout ────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history for git tools
+          token: ${{ secrets.SHADOWDEV_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # ── Configure git identity ───────────────────────────────
+      - name: Configure git
+        run: |
+          git config user.name "ShadowDev Agent"
+          git config user.email "shadowdev-bot@users.noreply.github.com"
+
+      # ── Set up Python ────────────────────────────────────────
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # ── Extract prompt ───────────────────────────────────────
+      - name: Extract prompt from trigger
+        id: extract
+        run: |
+          if [[ "${{ github.event_name }}" == "issue_comment" ]]; then
+            # Strip "/shadowdev " prefix from comment body
+            COMMENT="${{ github.event.comment.body }}"
+            PROMPT="${COMMENT#/shadowdev }"
+            ISSUE_NUM="${{ github.event.issue.number }}"
+          elif [[ "${{ github.event_name }}" == "issues" ]]; then
+            PROMPT="Review issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}. ${{ github.event.issue.body }}"
+            ISSUE_NUM="${{ github.event.issue.number }}"
+          elif [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            PROMPT="Review PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}. ${{ github.event.pull_request.body }}"
+            ISSUE_NUM="${{ github.event.pull_request.number }}"
+          fi
+
+          echo "prompt=$PROMPT" >> "$GITHUB_OUTPUT"
+          echo "issue_num=$ISSUE_NUM" >> "$GITHUB_OUTPUT"
+          echo "branch=shadowdev/task-$ISSUE_NUM-${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      # ── Post "starting" acknowledgement ─────────────────────
+      - name: Acknowledge trigger
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SHADOWDEV_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const issueNum = parseInt('${{ steps.extract.outputs.issue_num }}');
+            const isPR = context.eventName === 'pull_request';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNum,
+              body: `🤖 **ShadowDev Agent** is working on this...\n\nPrompt: \`${{ steps.extract.outputs.prompt }}\`\n\nRun: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`
+            });
+
+      # ── Create working branch (for issue tasks) ──────────────
+      - name: Create task branch
+        if: github.event_name != 'pull_request'
+        run: |
+          git checkout -b "${{ steps.extract.outputs.branch }}"
+
+      # ── Run ShadowDev in headless mode ───────────────────────
+      - name: Run ShadowDev agent
+        id: agent
+        env:
+          LLM_PROVIDER: ${{ secrets.SHADOWDEV_LLM_PROVIDER || 'openai' }}
+          OPENAI_API_KEY: ${{ secrets.SHADOWDEV_OPENAI_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.SHADOWDEV_ANTHROPIC_KEY }}
+          GITHUB_TOKEN: ${{ secrets.SHADOWDEV_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          OPENAI_MODEL: ${{ secrets.SHADOWDEV_MODEL || 'gpt-4o' }}
+          WORKSPACE_DIR: ${{ github.workspace }}
+        run: |
+          TIMEOUT="${{ secrets.SHADOWDEV_TIMEOUT || '300' }}"
+          SESSION_ID="gh-${{ github.event_name }}-${{ steps.extract.outputs.issue_num }}-${{ github.run_number }}"
+
+          python cli.py \
+            --prompt "${{ steps.extract.outputs.prompt }}" \
+            --session-id "$SESSION_ID" \
+            --output-format json \
+            --timeout "$TIMEOUT" \
+            > agent_output.json 2>agent_stderr.log
+          EXIT_CODE=$?
+
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+          # Extract final response text from JSON output
+          RESPONSE=$(python -c "
+          import json, sys
+          try:
+              data = json.load(open('agent_output.json'))
+              print(data.get('response', data.get('output', 'No response captured.')))
+          except Exception as e:
+              print(f'Could not parse agent output: {e}')
+          " 2>/dev/null || echo "Agent run completed.")
+
+          # Write to step summary
+          echo "## ShadowDev Agent Output" >> "$GITHUB_STEP_SUMMARY"
+          echo "$RESPONSE" >> "$GITHUB_STEP_SUMMARY"
+
+          # Save response for comment step
+          echo "$RESPONSE" > agent_response.txt
+
+      # ── Commit and push changes (if any) ────────────────────
+      - name: Commit and push changes
+        id: git_push
+        run: |
+          git add -A
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            echo "changes=false" >> "$GITHUB_OUTPUT"
+          else
+            COMMIT_MSG="chore: ShadowDev agent changes for issue #${{ steps.extract.outputs.issue_num }}"
+            git commit -m "$COMMIT_MSG"
+
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              BRANCH="${{ github.event.pull_request.head.ref }}"
+            else
+              BRANCH="${{ steps.extract.outputs.branch }}"
+            fi
+
+            git push origin "$BRANCH" --force-with-lease || git push origin "$BRANCH"
+            echo "changes=true" >> "$GITHUB_OUTPUT"
+            echo "pushed_branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Create PR for issue tasks (if changes made) ─────────
+      - name: Create pull request
+        if: steps.git_push.outputs.changes == 'true' && github.event_name != 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SHADOWDEV_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const response = require('fs').readFileSync('agent_response.txt', 'utf8');
+            const pr = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[ShadowDev] Task from issue #${{ steps.extract.outputs.issue_num }}`,
+              head: '${{ steps.extract.outputs.branch }}',
+              base: '${{ github.event.repository.default_branch }}',
+              body: [
+                `## ShadowDev Agent — Automated Changes`,
+                ``,
+                `Triggered by issue #${{ steps.extract.outputs.issue_num }}`,
+                `Prompt: \`${{ steps.extract.outputs.prompt }}\``,
+                ``,
+                `### Agent Response`,
+                `\`\`\``,
+                response.substring(0, 3000),
+                `\`\`\``,
+                ``,
+                `---`,
+                `*Automated by [ShadowDev Agent](https://github.com/${{ github.repository }})*`,
+              ].join('\n'),
+            });
+            console.log(`Created PR #${pr.data.number}: ${pr.data.html_url}`);
+
+      # ── Post result comment ──────────────────────────────────
+      - name: Post result comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SHADOWDEV_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const exitCode = '${{ steps.agent.outputs.exit_code }}';
+            const hasChanges = '${{ steps.git_push.outputs.changes }}' === 'true';
+
+            let response = 'Agent run completed.';
+            try {
+              response = fs.readFileSync('agent_response.txt', 'utf8').substring(0, 4000);
+            } catch(e) {}
+
+            let stderr = '';
+            try {
+              stderr = fs.readFileSync('agent_stderr.log', 'utf8').substring(0, 500);
+            } catch(e) {}
+
+            const status = exitCode === '0' ? '✅ Success' : exitCode === '124' ? '⏱️ Timeout' : '❌ Error';
+            const changesNote = hasChanges
+              ? `\n\n📝 Changes committed and pushed to \`${{ steps.git_push.outputs.pushed_branch }}\`.`
+              : '\n\n_(No file changes were made.)_';
+
+            const body = [
+              `### 🤖 ShadowDev Agent Result — ${status}`,
+              ``,
+              response,
+              changesNote,
+              stderr ? `\n<details><summary>Stderr</summary>\n\n\`\`\`\n${stderr}\n\`\`\`\n</details>` : '',
+            ].filter(Boolean).join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt('${{ steps.extract.outputs.issue_num }}'),
+              body,
+            });

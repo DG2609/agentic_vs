@@ -557,6 +557,11 @@ async def summarize_node(state: AgentState) -> dict:
     Smart compaction: uses token estimation + structured template.
     Falls back to message count if token estimation not available.
     """
+    from agent.hooks import run_lifecycle_hook, LIFECYCLE_HOOKS
+
+    if LIFECYCLE_HOOKS:
+        await run_lifecycle_hook("pre_compact", {"message_count": len(state.messages)})
+
     messages = list(state.messages)
 
     # Check if compaction needed
@@ -608,7 +613,12 @@ async def summarize_node(state: AgentState) -> dict:
     delete_messages = [RemoveMessage(id=m.id) for m in to_summarize
                        if hasattr(m, "id") and m.id]
 
-    return {
+    result = {
         "summary": response.content,
         "messages": delete_messages,
     }
+
+    if LIFECYCLE_HOOKS:
+        await run_lifecycle_hook("post_compact", {"summary_length": len(response.content)})
+
+    return result

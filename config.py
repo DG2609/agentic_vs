@@ -121,6 +121,45 @@ class Settings(BaseSettings):
         "llama-3.3-70b-versatile": 131072,
     })
 
+    # ── Container Sandbox ─────────────────────────────────────
+    SANDBOX_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "Run terminal_exec inside a Docker container for OS-level isolation. "
+            "Requires Docker daemon to be running. Falls back to direct execution if Docker "
+            "is unavailable."
+        ),
+    )
+    SANDBOX_IMAGE: str = Field(
+        default="python:3.12-slim",
+        description="Docker image used for the sandbox container.",
+    )
+    SANDBOX_NETWORK: str = Field(
+        default="none",
+        description="Docker network mode: 'none' (full isolation), 'bridge', or 'host'.",
+    )
+    SANDBOX_MEMORY: str = Field(
+        default="512m",
+        description="Memory limit for the sandbox container (Docker format, e.g. '512m', '1g').",
+    )
+    SANDBOX_CPUS: str = Field(
+        default="1.0",
+        description="CPU quota for the sandbox container (e.g. '1.0' = one CPU).",
+    )
+    SANDBOX_PIDS_LIMIT: int = Field(
+        default=100,
+        ge=10,
+        le=10000,
+        description="Maximum number of processes inside the sandbox container.",
+    )
+    SANDBOX_READONLY: bool = Field(
+        default=False,
+        description=(
+            "Mount workspace read-only inside the sandbox. "
+            "Useful for analysis-only tasks. Default False (read-write)."
+        ),
+    )
+
     # ── Hooks ─────────────────────────────────────────────────
     HOOKS_FILE: str = Field(default="", description="Path to hooks config JSON. Empty = no hooks.")
 
@@ -238,6 +277,14 @@ WORKSPACE_DIR = _settings.WORKSPACE_DIR
 MAX_OUTPUT_LINES = _settings.MAX_OUTPUT_LINES
 MAX_OUTPUT_BYTES = _settings.MAX_OUTPUT_BYTES
 RIPGREP_PATH = _settings.RIPGREP_PATH
+
+SANDBOX_ENABLED = _settings.SANDBOX_ENABLED
+SANDBOX_IMAGE = _settings.SANDBOX_IMAGE
+SANDBOX_NETWORK = _settings.SANDBOX_NETWORK
+SANDBOX_MEMORY = _settings.SANDBOX_MEMORY
+SANDBOX_CPUS = _settings.SANDBOX_CPUS
+SANDBOX_PIDS_LIMIT = _settings.SANDBOX_PIDS_LIMIT
+SANDBOX_READONLY = _settings.SANDBOX_READONLY
 
 HOOKS_FILE = _settings.HOOKS_FILE
 

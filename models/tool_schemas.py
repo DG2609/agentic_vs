@@ -786,3 +786,307 @@ class SkillCreateArgs(BaseModel):
         if not v.strip():
             raise ValueError("description cannot be empty")
         return v.strip()
+
+
+# ═══════════════════════════════════════════════════════════
+# GitHub Integration
+# ═══════════════════════════════════════════════════════════
+
+_REPO_DESC = (
+    "GitHub repo as 'owner/repo' (e.g. 'microsoft/vscode'). "
+    "Leave empty to auto-detect from git remote origin."
+)
+
+
+class GithubListIssuesArgs(BaseModel):
+    """Arguments for listing GitHub issues."""
+    repo: str = Field(default="", description=_REPO_DESC)
+    state: str = Field(
+        default="open",
+        description="Issue state: 'open', 'closed', or 'all'. Default: open.",
+    )
+    labels: str = Field(
+        default="",
+        description="Comma-separated label names to filter by (e.g. 'bug,help wanted').",
+    )
+    assignee: str = Field(
+        default="",
+        description="Filter by assignee username. Leave empty for all assignees.",
+    )
+    per_page: int = Field(
+        default=20, ge=1, le=100,
+        description="Number of issues to return (1-100). Default: 20.",
+    )
+
+
+class GithubListPRsArgs(BaseModel):
+    """Arguments for listing GitHub pull requests."""
+    repo: str = Field(default="", description=_REPO_DESC)
+    state: str = Field(
+        default="open",
+        description="PR state: 'open', 'closed', or 'all'. Default: open.",
+    )
+    base: str = Field(
+        default="",
+        description="Filter by target base branch (e.g. 'main'). Empty = all branches.",
+    )
+    per_page: int = Field(
+        default=20, ge=1, le=100,
+        description="Number of PRs to return (1-100). Default: 20.",
+    )
+
+
+class GithubGetPRArgs(BaseModel):
+    """Arguments for getting a specific pull request."""
+    pr_number: int = Field(description="The PR number to retrieve.", ge=1)
+    repo: str = Field(default="", description=_REPO_DESC)
+
+
+class GithubCreateIssueArgs(BaseModel):
+    """Arguments for creating a GitHub issue."""
+    title: str = Field(description="Issue title.")
+    body: str = Field(default="", description="Issue body in Markdown.")
+    labels: str = Field(
+        default="",
+        description="Comma-separated label names to apply (e.g. 'bug,enhancement').",
+    )
+    assignee: str = Field(default="", description="Username to assign to this issue.")
+    repo: str = Field(default="", description=_REPO_DESC)
+
+    @field_validator("title")
+    @classmethod
+    def title_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("title cannot be empty")
+        return v.strip()
+
+
+class GithubCreatePRArgs(BaseModel):
+    """Arguments for creating a GitHub pull request."""
+    title: str = Field(description="PR title.")
+    branch: str = Field(
+        description="Head branch to merge FROM (must exist on remote — use git_push first).",
+    )
+    base: str = Field(default="main", description="Target base branch to merge INTO. Default: 'main'.")
+    body: str = Field(default="", description="PR description in Markdown.")
+    draft: bool = Field(default=False, description="Create as draft PR. Default: False.")
+    repo: str = Field(default="", description=_REPO_DESC)
+
+    @field_validator("title")
+    @classmethod
+    def title_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("title cannot be empty")
+        return v.strip()
+
+    @field_validator("branch")
+    @classmethod
+    def branch_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("branch cannot be empty")
+        return v.strip()
+
+
+class GithubCommentArgs(BaseModel):
+    """Arguments for commenting on a GitHub issue or PR."""
+    number: int = Field(description="Issue or PR number to comment on.", ge=1)
+    body: str = Field(description="Comment body in Markdown.")
+    repo: str = Field(default="", description=_REPO_DESC)
+
+    @field_validator("body")
+    @classmethod
+    def body_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("comment body cannot be empty")
+        return v.strip()
+
+
+# ═══════════════════════════════════════════════════════════
+# GitLab Integration
+# ═══════════════════════════════════════════════════════════
+
+_GL_REPO_DESC = (
+    "GitLab project as 'namespace/project' (e.g. 'mygroup/myrepo'). "
+    "Leave empty to auto-detect from git remote origin."
+)
+
+_GL_STATE_ISSUE = "Issue state: 'opened', 'closed', or 'all'. Default: opened."
+_GL_STATE_MR = "MR state: 'opened', 'closed', 'merged', or 'all'. Default: opened."
+
+
+class GitlabListIssuesArgs(BaseModel):
+    """Arguments for listing GitLab issues."""
+    repo: str = Field(default="", description=_GL_REPO_DESC)
+    state: str = Field(default="opened", description=_GL_STATE_ISSUE)
+    labels: str = Field(
+        default="",
+        description="Comma-separated label names to filter by (e.g. 'bug,help wanted').",
+    )
+    assignee: str = Field(
+        default="",
+        description="Filter by assignee username. Leave empty for all assignees.",
+    )
+    per_page: int = Field(
+        default=20, ge=1, le=100,
+        description="Number of issues to return (1-100). Default: 20.",
+    )
+
+
+class GitlabListMRsArgs(BaseModel):
+    """Arguments for listing GitLab merge requests."""
+    repo: str = Field(default="", description=_GL_REPO_DESC)
+    state: str = Field(default="opened", description=_GL_STATE_MR)
+    target_branch: str = Field(
+        default="",
+        description="Filter by target branch (e.g. 'main'). Empty = all branches.",
+    )
+    per_page: int = Field(
+        default=20, ge=1, le=100,
+        description="Number of MRs to return (1-100). Default: 20.",
+    )
+
+
+class GitlabGetMRArgs(BaseModel):
+    """Arguments for getting a specific GitLab merge request."""
+    mr_number: int = Field(description="The MR IID (internal ID) to retrieve.", ge=1)
+    repo: str = Field(default="", description=_GL_REPO_DESC)
+
+
+class GitlabCreateIssueArgs(BaseModel):
+    """Arguments for creating a GitLab issue."""
+    title: str = Field(description="Issue title.")
+    body: str = Field(default="", description="Issue description in Markdown.")
+    labels: str = Field(
+        default="",
+        description="Comma-separated label names to apply (e.g. 'bug,enhancement').",
+    )
+    assignee: str = Field(
+        default="",
+        description="Username or numeric user ID to assign to this issue.",
+    )
+    repo: str = Field(default="", description=_GL_REPO_DESC)
+
+    @field_validator("title")
+    @classmethod
+    def title_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("title cannot be empty")
+        return v.strip()
+
+
+class GitlabCreateMRArgs(BaseModel):
+    """Arguments for creating a GitLab merge request."""
+    title: str = Field(description="MR title.")
+    source_branch: str = Field(
+        description="Source branch to merge FROM (must exist on remote — use git_push first).",
+    )
+    target_branch: str = Field(
+        default="main",
+        description="Target branch to merge INTO. Default: 'main'.",
+    )
+    description: str = Field(default="", description="MR description in Markdown.")
+    draft: bool = Field(
+        default=False,
+        description="Create as draft MR (prefixes title with 'Draft:'). Default: False.",
+    )
+    remove_source_branch: bool = Field(
+        default=False,
+        description="Delete source branch after merge. Default: False.",
+    )
+    repo: str = Field(default="", description=_GL_REPO_DESC)
+
+    @field_validator("title")
+    @classmethod
+    def title_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("title cannot be empty")
+        return v.strip()
+
+    @field_validator("source_branch")
+    @classmethod
+    def branch_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("source_branch cannot be empty")
+        return v.strip()
+
+
+class GitlabCommentArgs(BaseModel):
+    """Arguments for commenting on a GitLab issue or MR."""
+    number: int = Field(description="Issue IID or MR IID to comment on.", ge=1)
+    body: str = Field(description="Comment body in Markdown.")
+    resource_type: str = Field(
+        default="issue",
+        description="Target resource: 'issue' (default) or 'mr' (merge request).",
+    )
+    repo: str = Field(default="", description=_GL_REPO_DESC)
+
+    @field_validator("body")
+    @classmethod
+    def body_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("comment body cannot be empty")
+        return v.strip()
+
+    @field_validator("resource_type")
+    @classmethod
+    def valid_resource_type(cls, v):
+        if v not in ("issue", "mr"):
+            raise ValueError("resource_type must be 'issue' or 'mr'")
+        return v
+
+
+# ── Skill Hub ─────────────────────────────────────────────────
+
+class HubSearchArgs(BaseModel):
+    """Arguments for searching the Skill Hub index."""
+    query: str = Field(
+        default="",
+        description="Keyword to search across skill names, descriptions, and tags.",
+    )
+    category: str = Field(
+        default="",
+        description="Filter by category (e.g. 'devops', 'testing', 'refactor').",
+    )
+    tag: str = Field(
+        default="",
+        description="Filter by a specific tag.",
+    )
+
+
+class SkillInstallArgs(BaseModel):
+    """Arguments for installing a skill from the Hub or a direct URL."""
+    name: str = Field(
+        description=(
+            "Skill name to install (looked up in the hub index), "
+            "or the local filename stem when providing a direct url."
+        )
+    )
+    url: str = Field(
+        default="",
+        description=(
+            "Optional direct URL to a .md or .py skill file. "
+            "When provided, the hub index is not consulted."
+        ),
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="Replace an already-installed skill with the same name.",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def name_valid(cls, v):
+        import re as _re
+        if not _re.match(r"^[\w][\w\-]*$", v):
+            raise ValueError(
+                "Skill name must start with a letter/digit and contain only "
+                "letters, digits, and hyphens."
+            )
+        return v
+
+
+class SkillRemoveArgs(BaseModel):
+    """Arguments for removing an installed skill."""
+    name: str = Field(
+        description="Name of the skill to remove (markdown or plugin).",
+    )

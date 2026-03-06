@@ -1,0 +1,165 @@
+{
+  "name": "shadowdev",
+  "displayName": "ShadowDev Agentic IDE",
+  "description": "LangGraph-based coding assistant with 60+ tools — chat, explain, edit, test, commit",
+  "version": "0.4.0",
+  "publisher": "shadowdev",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["AI", "Chat", "Programming Languages", "Other"],
+  "keywords": ["ai", "agent", "langgraph", "coding-assistant", "llm", "copilot"],
+  "icon": "resources/icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shadowdev/shadowdev"
+  },
+  "activationEvents": ["onStartupFinished"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "shadowdev",
+          "title": "ShadowDev",
+          "icon": "resources/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "shadowdev": [
+        {
+          "id": "shadowdev.chatView",
+          "name": "Chat",
+          "type": "webview",
+          "when": "true"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "shadowdev.openChat",
+        "title": "Open ShadowDev Chat",
+        "category": "ShadowDev",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "shadowdev.sendSelection",
+        "title": "Send Selection to ShadowDev",
+        "category": "ShadowDev"
+      },
+      {
+        "command": "shadowdev.explainFile",
+        "title": "Explain This File",
+        "category": "ShadowDev"
+      },
+      {
+        "command": "shadowdev.reviewFile",
+        "title": "Review This File",
+        "category": "ShadowDev"
+      },
+      {
+        "command": "shadowdev.runInTerminal",
+        "title": "Run ShadowDev in Terminal",
+        "category": "ShadowDev"
+      },
+      {
+        "command": "shadowdev.newSession",
+        "title": "New Chat Session",
+        "category": "ShadowDev",
+        "icon": "$(add)"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "shadowdev.sendSelection",
+          "when": "editorHasSelection",
+          "group": "shadowdev@1"
+        },
+        {
+          "command": "shadowdev.explainFile",
+          "group": "shadowdev@2"
+        },
+        {
+          "command": "shadowdev.reviewFile",
+          "group": "shadowdev@3"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "shadowdev.newSession",
+          "when": "view == shadowdev.chatView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "shadowdev.openChat",
+        "key": "ctrl+shift+d",
+        "mac": "cmd+shift+d"
+      },
+      {
+        "command": "shadowdev.sendSelection",
+        "key": "ctrl+shift+s",
+        "mac": "cmd+shift+s",
+        "when": "editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "ShadowDev",
+      "properties": {
+        "shadowdev.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to the Python interpreter running ShadowDev."
+        },
+        "shadowdev.workspacePath": {
+          "type": "string",
+          "default": "",
+          "description": "ShadowDev project root. Defaults to the VS Code workspace folder."
+        },
+        "shadowdev.mode": {
+          "type": "string",
+          "enum": ["cli", "server"],
+          "default": "cli",
+          "description": "How to communicate with the agent: 'cli' spawns cli.py, 'server' connects to a running server."
+        },
+        "shadowdev.serverUrl": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "ShadowDev server URL (used when mode=server)."
+        },
+        "shadowdev.includeActiveFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically include the active file path in every prompt."
+        },
+        "shadowdev.sessionId": {
+          "type": "string",
+          "default": "",
+          "description": "Fixed session ID for persistent multi-turn context. Leave empty for auto-generated."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --minify",
+    "dev": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --sourcemap --watch",
+    "lint": "eslint src --ext .ts",
+    "typecheck": "tsc --noEmit",
+    "package": "npx @vscode/vsce package",
+    "test": "node dist/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vscode/vsce": "^2.24.0",
+    "esbuild": "^0.20.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.0"
+  }
+}

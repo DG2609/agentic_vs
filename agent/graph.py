@@ -19,6 +19,7 @@ Upgraded with:
 """
 
 import asyncio
+import json
 import logging
 from functools import partial
 from langgraph.graph import StateGraph, END
@@ -61,12 +62,22 @@ from agent.tools.memory import memory_save, memory_search, memory_list, memory_d
 from agent.tools.code_quality import code_quality
 from agent.tools.dep_graph import dep_graph
 from agent.tools.context_build import context_build
-from agent.tools.skills import skill_invoke, skill_list, skill_create
+from agent.tools.skills import skill_invoke, skill_list, skill_create, hub_search, skill_install, skill_remove
+from agent.tools.github import (
+    github_list_issues, github_list_prs, github_get_pr,
+    github_create_issue, github_create_pr, github_comment,
+)
+from agent.tools.gitlab import (
+    gitlab_list_issues, gitlab_list_mrs, gitlab_get_mr,
+    gitlab_create_issue, gitlab_create_mr, gitlab_comment,
+)
 from agent.skill_loader import load_skills as _load_skills
+from agent.plugin_registry import get_plugin_tools as _get_plugin_tools, list_plugins as _list_installed_plugins
 from agent.hooks import (
     run_pre_hooks, run_post_hooks,
     load_hooks_from_file, PRE_TOOL_HOOKS, POST_TOOL_HOOKS,
 )
+from agent.mcp_client import load_mcp_tools as _load_mcp_tools
 import config
 
 logger = logging.getLogger(__name__)
@@ -87,11 +98,21 @@ _CORE_TOOLS = [
     run_tests,
     memory_save, memory_search, memory_list, memory_delete,
     code_quality, dep_graph, context_build,
-    skill_invoke, skill_list, skill_create,
+    skill_invoke, skill_list, skill_create, hub_search, skill_install, skill_remove,
+    github_list_issues, github_list_prs, github_get_pr,
+    github_create_issue, github_create_pr, github_comment,
+    gitlab_list_issues, gitlab_list_mrs, gitlab_get_mr,
+    gitlab_create_issue, gitlab_create_mr, gitlab_comment,
 ]
-_planner_skills, _coder_skills = _load_skills(
-    existing_names={t.name for t in _CORE_TOOLS}
-)
+_all_core_names = {t.name for t in _CORE_TOOLS}
+_planner_skills, _coder_skills = _load_skills(existing_names=_all_core_names)
+
+# ── Load pip-installed plugins (entry_points group "shadowdev.tools") ──────
+_existing_names = _all_core_names | {t.name for t in _planner_skills + _coder_skills}
+_plugin_planner, _plugin_coder = _get_plugin_tools(existing_names=_existing_names)
+
+# ── Load MCP server tools ────────────────────────────────────
+_mcp_planner_tools, _mcp_coder_tools = _load_mcp_tools(config.MCP_SERVERS)
 
 
 # ── Separate Tools for Swarm Roles ──────────────────────────
@@ -111,10 +132,18 @@ PLANNER_TOOLS = [
     # Agent coordination
     handoff_to_coder, reply_to_user, task_explore, task_explore_parallel,
     todo_read, todo_write, plan_enter, plan_exit, question,
-    # Skill system (markdown workflow skills)
-    skill_invoke, skill_list,
+    # Skill system (markdown workflow skills + hub discovery)
+    skill_invoke, skill_list, hub_search,
+    # GitHub (read-only)
+    github_list_issues, github_list_prs, github_get_pr,
+    # GitLab (read-only)
+    gitlab_list_issues, gitlab_list_mrs, gitlab_get_mr,
     # External skills (read/both access)
     *_planner_skills,
+    # Pip-installed plugins (read/both access)
+    *_plugin_planner,
+    # MCP server tools (read/both access)
+    *_mcp_planner_tools,
 ]
 
 CODER_TOOLS = PLANNER_TOOLS + [
@@ -128,10 +157,18 @@ CODER_TOOLS = PLANNER_TOOLS + [
     git_push, git_pull, git_fetch, git_merge,
     # Agent coordination
     handoff_to_planner, task_general, task_review,
-    # Skill system (create new workflow skills)
-    skill_create,
+    # GitHub (write)
+    github_create_issue, github_create_pr, github_comment,
+    # GitLab (write)
+    gitlab_create_issue, gitlab_create_mr, gitlab_comment,
+    # Skill system (create, install, remove skills)
+    skill_create, skill_install, skill_remove,
     # External skills (write access)
     *_coder_skills,
+    # Pip-installed plugins (write access)
+    *_plugin_coder,
+    # MCP server tools (write access)
+    *_mcp_coder_tools,
 ]
 
 ALL_TOOLS = list({t.name: t for t in PLANNER_TOOLS + CODER_TOOLS}.values())
@@ -143,68 +180,115 @@ if config.HOOKS_FILE:
 
 
 class HookedToolNode:
-    """Wraps LangGraph ToolNode with pre/post hook support.
+    """Wraps LangGraph ToolNode with pre/post hook support and parallel execution.
 
-    - Before each tool call: runs matching pre-hooks (can block or modify args)
-    - After each tool call: runs matching post-hooks (can modify output)
+    - Pre-hooks run in parallel for all tool calls before execution.
+    - Tools execute in parallel via asyncio.gather (order-preserving).
+    - Post-hooks run in parallel on all results.
+    - A blocked tool returns an error message; others still execute.
     """
 
     def __init__(self, tools: list):
         self._inner = ToolNode(tools)
-        self._has_hooks = bool(PRE_TOOL_HOOKS or POST_TOOL_HOOKS)
+        self._tool_map = {t.name: t for t in tools}
+
+    @property
+    def _has_hooks(self) -> bool:
+        return bool(PRE_TOOL_HOOKS or POST_TOOL_HOOKS)
+
+    async def _invoke_one(self, tool, args: dict) -> str:
+        """Invoke a single tool asynchronously, returning a string result."""
+        try:
+            if hasattr(tool, "ainvoke"):
+                result = await tool.ainvoke(args)
+            else:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, tool.invoke, args)
+            if isinstance(result, str):
+                return result
+            if isinstance(result, (dict, list)):
+                return json.dumps(result)
+            return str(result)
+        except Exception as e:
+            return f"Error: {type(e).__name__}: {e}"
 
     async def __call__(self, state):
         if not self._has_hooks:
             return await self._inner.ainvoke(state)
 
-        # Process tool calls with hooks
         messages = list(state["messages"]) if isinstance(state, dict) else list(state.messages)
         last_msg = messages[-1] if messages else None
 
         if not last_msg or not getattr(last_msg, "tool_calls", None):
             return await self._inner.ainvoke(state)
 
-        # Run pre-hooks — check for blocks
-        for tc in last_msg.tool_calls:
+        tool_calls = last_msg.tool_calls
+
+        # ── Step 1: Run all pre-hooks in parallel ─────────────────
+        pre_results = await asyncio.gather(*[
+            run_pre_hooks(tc.get("name", ""), tc.get("args", {}))
+            for tc in tool_calls
+        ])
+
+        # ── Step 2: Partition blocked vs executable (preserve order) ─
+        pending: list = [None] * len(tool_calls)  # (tc_id, tool_name, content)
+        to_execute: list = []  # (index, tc_id, tool_name, args, tool)
+
+        for i, (tc, pre_result) in enumerate(zip(tool_calls, pre_results)):
             tool_name = tc.get("name", "")
-            tool_args = tc.get("args", {})
-            pre_result = await run_pre_hooks(tool_name, tool_args)
+            tc_id = tc.get("id", "")
 
             if pre_result.block:
-                # Return a blocked message instead of executing
-                blocked_msg = ToolMessage(
-                    content=f"[BLOCKED by hook] {pre_result.reason}",
-                    tool_call_id=tc.get("id", ""),
-                    name=tool_name,
-                )
-                return {"messages": [blocked_msg]}
+                pending[i] = (tc_id, tool_name, f"[BLOCKED by hook] {pre_result.reason}")
+                continue
 
-            # Modify args if hook requested
-            if pre_result.modified_args is not None:
-                tc["args"] = pre_result.modified_args
+            effective_args = (
+                pre_result.modified_args
+                if pre_result.modified_args is not None
+                else tc.get("args", {})
+            )
+            tool = self._tool_map.get(tool_name)
+            if tool is None:
+                pending[i] = (tc_id, tool_name, f"Unknown tool: {tool_name}")
+                continue
 
-        # Execute tools normally
-        result = await self._inner.ainvoke(state)
+            to_execute.append((i, tc_id, tool_name, effective_args, tool))
 
-        # Run post-hooks
-        result_messages = result.get("messages", []) if isinstance(result, dict) else []
-        modified_messages = []
-        for msg in result_messages:
-            if isinstance(msg, ToolMessage):
-                tool_name = getattr(msg, "name", "")
-                post_result = await run_post_hooks(tool_name, {}, getattr(msg, "content", ""))
-                if post_result.modified_output is not None:
-                    msg = ToolMessage(
-                        content=post_result.modified_output,
-                        tool_call_id=msg.tool_call_id,
-                        name=tool_name,
-                    )
-            modified_messages.append(msg)
+        # ── Step 3: Execute all non-blocked tools in parallel ─────
+        if to_execute:
+            exec_results = await asyncio.gather(*[
+                self._invoke_one(tool, args)
+                for _, _, _, args, tool in to_execute
+            ], return_exceptions=True)
 
-        if modified_messages:
-            result["messages"] = modified_messages
+            for (i, tc_id, tool_name, args, tool), exec_result in zip(to_execute, exec_results):
+                if isinstance(exec_result, BaseException):
+                    content = f"Error in {tool_name}: {type(exec_result).__name__}: {exec_result}"
+                else:
+                    content = exec_result
+                pending[i] = (tc_id, tool_name, content)
 
-        return result
+        # ── Step 4: Run all post-hooks in parallel ────────────────
+        post_results = await asyncio.gather(*[
+            run_post_hooks(tool_name, {}, content)
+            for _, tool_name, content in pending
+        ])
+
+        # ── Step 5: Build final ToolMessage list ──────────────────
+        tool_messages = []
+        for (tc_id, tool_name, content), post_result in zip(pending, post_results):
+            final_content = (
+                post_result.modified_output
+                if post_result.modified_output is not None
+                else content
+            )
+            tool_messages.append(ToolMessage(
+                content=final_content,
+                tool_call_id=tc_id,
+                name=tool_name,
+            ))
+
+        return {"messages": tool_messages}
 
 
 def should_compact(state: AgentState) -> str:

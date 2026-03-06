@@ -49,3 +49,7 @@ duckduckgo_search>=5.0
 # CLI UI
 rich>=13.9.4,<14.0
 prompt_toolkit>=3.0.48
+
+# MCP (Model Context Protocol) — optional
+# Install to enable MCP server tool integration (config.MCP_SERVERS)
+# mcp>=1.0.0

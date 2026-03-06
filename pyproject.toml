@@ -1,0 +1,118 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "shadowdev"
+version = "0.4.0"
+description = "ShadowDev Agentic IDE — LangGraph-based coding assistant with 60+ tools"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.12"
+keywords = ["ai", "agent", "langgraph", "coding-assistant", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "langgraph>=0.2.57",
+    "langgraph-checkpoint-sqlite>=1.0.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-ollama>=0.2.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "aiofiles>=24.0,<25.0",
+    "aiosqlite>=0.19.0",
+    "python-dotenv>=1.0",
+    "requests>=2.31,<3.0",
+    "rich>=13.9.4,<14.0",
+    "prompt_toolkit>=3.0.48",
+    "duckduckgo_search>=5.0",
+    "markdown>=3.7",
+    "Pygments>=2.19",
+]
+
+[project.optional-dependencies]
+server = [
+    "python-socketio[aiohttp]>=5.0",
+    "aiohttp>=3.9",
+    "aiohttp-cors>=0.7",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
+vector = [
+    "chromadb>=0.5.0",
+]
+anthropic = ["langchain-anthropic>=0.3.0"]
+google    = ["langchain-google-genai>=2.0.0"]
+groq      = ["langchain-groq>=0.2.0"]
+mcp       = ["mcp>=1.0.0"]
+all = [
+    "shadowdev[server,vector,anthropic,google,groq,mcp]",
+    "pyright>=1.1.0",
+    "tiktoken>=0.5.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.8",
+]
+
+[project.scripts]
+shadowdev = "cli:main"
+
+[project.urls]
+Homepage   = "https://github.com/shadowdev/shadowdev"
+Repository = "https://github.com/shadowdev/shadowdev"
+Issues     = "https://github.com/shadowdev/shadowdev/issues"
+Changelog  = "https://github.com/shadowdev/shadowdev/blob/main/CHANGELOG.md"
+
+# ── Tool configurations ────────────────────────────────────────
+
+[tool.setuptools.packages.find]
+include = ["agent*", "models*", "skills*", "indexer*"]
+exclude = [
+    "env*", "tests*", "*.egg-info",
+    "continue_dev_ref*", "opencode_ref*", "claude_code_ref*",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = [
+    "env/", "continue_dev_ref/", "opencode_ref/", "claude_code_ref/",
+    "__pycache__/", ".git/", "*.egg-info/",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # function calls in defaults (LangChain tools use this)
+    "B904",   # raise from in except (too noisy)
+    "SIM108", # ternary operators — style preference
+    "UP007",  # X | Y unions (keep Optional for readability)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agent", "models", "skills", "indexer", "config"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+exclude = ["env/", "continue_dev_ref/", "opencode_ref/", "claude_code_ref/"]

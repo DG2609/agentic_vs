@@ -20,7 +20,13 @@ from agent.skill_engine import (
     SKILLS_DIR,
 )
 from agent.tools.truncation import truncate_output
-from models.tool_schemas import SkillInvokeArgs, SkillCreateArgs
+from models.tool_schemas import (
+    SkillInvokeArgs,
+    SkillCreateArgs,
+    HubSearchArgs,
+    SkillInstallArgs,
+    SkillRemoveArgs,
+)
 import re
 
 
@@ -111,8 +117,34 @@ def skill_list() -> str:
             model_note = f"  ·  model: `{s.meta.model}`" if s.meta.model else ""
             lines.append(f"- **{s.meta.name}** — {desc}{model_note}")
 
+    # ── Installed pip plugins ─────────────────────────────────
+    try:
+        from agent.plugin_registry import list_plugins
+        plugins = list_plugins()
+    except Exception:
+        plugins = []
+
+    if plugins:
+        lines.append("\n### Installed Plugins (pip)\n")
+        for p in sorted(plugins, key=lambda x: x["name"]):
+            status = "⚠️ error" if p["status"] == "error" else "✅"
+            desc = p["description"] if p["description"] != "—" else "*(no description)*"
+            ver = f"  v{p['version']}" if p["version"] != "—" else ""
+            author = f"  by {p['author']}" if p["author"] != "—" else ""
+            tool_names = ", ".join(f"`{t}`" for t in p["tools"][:5])
+            if len(p["tools"]) > 5:
+                tool_names += f" +{len(p['tools']) - 5} more"
+            access = f"  access={p['access']}" if p["status"] == "loaded" else ""
+            err = f"  error: {p['error']}" if p["error"] else ""
+            lines.append(
+                f"- {status} **{p['name']}**{ver}{author} — {desc}{access}"
+                + (f"\n  Tools: {tool_names}" if tool_names else "")
+                + (f"\n  ⚠️ {err}" if err else "")
+            )
+
     lines.append(
-        f"\n_Use `skill_invoke(name=...)` to load a skill into context._"
+        f"\n_Use `skill_invoke(name=...)` to load a skill into context._\n"
+        f"_Install plugins with `pip install shadowdev-plugin-<name>`._"
     )
     return truncate_output("\n".join(lines))
 
@@ -179,3 +211,169 @@ def skill_create(
         f"Path: `{skill_path}`\n\n"
         f"Use `skill_invoke(name='{safe_name}')` to load it."
     )
+
+
+# ── hub_search ────────────────────────────────────────────────
+
+@tool(args_schema=HubSearchArgs)
+def hub_search(query: str = "", category: str = "", tag: str = "") -> str:
+    """Search the Skill Hub index for community skills.
+
+    Fetches the remote hub index and filters by an optional keyword query,
+    category, and/or tag.  Returns a formatted list of matching skills with
+    names, versions, descriptions, and install instructions.
+
+    Leave all parameters empty to list every available skill.
+
+    Args:
+        query:    Keyword to match in name, description, or tags.
+        category: Exact category filter (e.g. 'devops', 'testing').
+        tag:      Exact tag filter (e.g. 'deploy', 'security').
+
+    Returns:
+        Formatted list of matching hub skills, or an error message.
+    """
+    try:
+        from agent.skill_hub import fetch_index
+    except ImportError:
+        return "Error: agent.skill_hub module not available."
+
+    try:
+        index = fetch_index()
+    except RuntimeError as e:
+        return f"Hub error: {e}"
+
+    results = index.search(query=query, category=category, tag=tag)
+
+    if not results:
+        filters = []
+        if query:
+            filters.append(f"query={query!r}")
+        if category:
+            filters.append(f"category={category!r}")
+        if tag:
+            filters.append(f"tag={tag!r}")
+        filter_str = ", ".join(filters) if filters else "no filters"
+        return (
+            f"No hub skills found ({filter_str}).\n\n"
+            f"Available categories: {', '.join(index.categories) or 'none'}\n"
+            "Try `hub_search()` with no arguments to list all skills."
+        )
+
+    lines = [f"## Skill Hub — {len(results)} result(s)\n"]
+    for s in results:
+        name = s.get("name", "?")
+        ver = s.get("version", "")
+        cat = s.get("category", "")
+        desc = s.get("description", "")
+        tags = ", ".join(f"`{t}`" for t in s.get("tags", []))
+        author = s.get("author", "")
+        skill_type = s.get("type", "markdown")
+
+        meta_parts = []
+        if ver:
+            meta_parts.append(f"v{ver}")
+        if cat:
+            meta_parts.append(cat)
+        if author:
+            meta_parts.append(f"by {author}")
+        meta_parts.append(skill_type)
+        meta = "  ·  ".join(meta_parts)
+
+        lines.append(f"- **{name}** ({meta})")
+        if desc:
+            lines.append(f"  {desc}")
+        if tags:
+            lines.append(f"  Tags: {tags}")
+        lines.append(f"  Install: `skill_install(name='{name}')`")
+
+    lines.append(
+        f"\n_Use `skill_install(name='<name>')` to install a skill._\n"
+        f"_Use `skill_list()` to see locally installed skills._"
+    )
+    return truncate_output("\n".join(lines))
+
+
+# ── skill_install ─────────────────────────────────────────────
+
+@tool(args_schema=SkillInstallArgs)
+def skill_install(name: str, url: str = "", overwrite: bool = False) -> str:
+    """Install a skill from the Skill Hub or a direct URL.
+
+    Downloads and installs either a markdown workflow skill (.md) or a Python
+    tool plugin (.py) from the community Skill Hub index or a raw URL.
+
+    After installation:
+      - Markdown skills are available immediately via skill_invoke().
+      - Plugin tools require restarting the agent to take effect.
+
+    Args:
+        name:      Skill name to look up in the hub (if url not given),
+                   or the local filename stem for a direct URL install.
+        url:       Optional direct URL to a .md or .py skill file.
+                   Bypasses the hub index lookup.
+        overwrite: Replace an already-installed skill with the same name.
+
+    Returns:
+        Confirmation with the installed path and sha256, or an error message.
+    """
+    try:
+        from agent.skill_hub import install_skill as _install
+    except ImportError:
+        return "Error: agent.skill_hub module not available."
+
+    try:
+        result = _install(name=name, url=url or None, overwrite=overwrite)
+    except (RuntimeError, ValueError) as e:
+        return f"Install failed: {e}"
+
+    status = result.get("status", "installed")
+    skill_path = result.get("path", "")
+    skill_type = result.get("type", "")
+    version = result.get("version", "unknown")
+    sha = result.get("sha256", "")
+
+    lines = [
+        f"Skill **{name}** {status} successfully.",
+        f"Path: `{skill_path}`",
+        f"Type: {skill_type}  ·  Version: {version}  ·  sha256: `{sha}`",
+    ]
+    if skill_type == "plugin":
+        lines.append(
+            "\n> **Note:** Plugin tools require restarting the agent to take effect."
+        )
+    else:
+        lines.append(f"\nUse `skill_invoke(name='{name}')` to load it.")
+
+    return "\n".join(lines)
+
+
+# ── skill_remove ──────────────────────────────────────────────
+
+@tool(args_schema=SkillRemoveArgs)
+def skill_remove(name: str) -> str:
+    """Remove a locally installed skill (markdown or plugin).
+
+    Deletes the skill file(s) from skills/ or skills/_tools/.
+    The change takes effect immediately for markdown skills.
+    Removing a plugin tool requires restarting the agent.
+
+    Args:
+        name: Name of the skill to remove.
+
+    Returns:
+        Confirmation message, or an error if the skill was not found.
+    """
+    try:
+        from agent.skill_hub import remove_skill as _remove
+    except ImportError:
+        return "Error: agent.skill_hub module not available."
+
+    try:
+        result = _remove(name)
+    except RuntimeError as e:
+        return f"Remove failed: {e}"
+
+    removed = result.get("removed", [])
+    paths = "\n".join(f"  - `{p}`" for p in removed)
+    return f"Skill **{name}** removed.\n\nDeleted files:\n{paths}"
