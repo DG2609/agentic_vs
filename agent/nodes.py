@@ -281,11 +281,13 @@ def _total_tokens(messages: list) -> int:
 # Project rules loader (AGENTS.md, CLAUDE.md, etc.)
 # ─────────────────────────────────────────────────────────────
 def _load_project_rules(workspace: str) -> str:
-    """Load project rules from AGENTS.md / CLAUDE.md in workspace root."""
+    """Load project rules from AGENTS.md / CLAUDE.md and .shadowdev/rules/*.md."""
     if not workspace:
         return ""
 
     rules_parts = []
+
+    # 1. Root-level rules files (AGENTS.md, CLAUDE.md, etc.)
     for name in getattr(config, "RULES_FILENAMES", ["AGENTS.md", "CLAUDE.md"]):
         path = os.path.join(workspace, name)
         if os.path.isfile(path):
@@ -295,6 +297,23 @@ def _load_project_rules(workspace: str) -> str:
                 rules_parts.append(f"## Project Rules ({name})\n{content}")
             except Exception:
                 pass
+
+    # 2. Rules directory: .shadowdev/rules/*.md (Continue.dev-style)
+    rules_dir = os.path.join(workspace, ".shadowdev", "rules")
+    if os.path.isdir(rules_dir):
+        try:
+            md_files = sorted(f for f in os.listdir(rules_dir) if f.endswith(".md"))
+            for fname in md_files:
+                fpath = os.path.join(rules_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read(5000)  # 5KB per rule file
+                    rule_name = fname.removesuffix(".md")
+                    rules_parts.append(f"## Rule: {rule_name}\n{content}")
+                except Exception:
+                    pass
+        except OSError:
+            pass
 
     return "\n\n".join(rules_parts)
 
@@ -483,6 +502,12 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     rules = _load_project_rules(state.workspace or config.WORKSPACE_DIR)
     if rules:
         system_content += f"\n\n{rules}"
+
+    # Inject model-aware edit instructions
+    from agent.model_aware import get_edit_instruction
+    edit_instr = get_edit_instruction()
+    if edit_instr:
+        system_content += edit_instr
 
     if state.summary:
         system_content += f"\n\n## Previous Conversation Summary\n{state.summary}"

@@ -1,0 +1,8 @@
+{
+  "sqlite": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-sqlite", "/path/to/database.db"],
+    "access": "read"
+  }
+}

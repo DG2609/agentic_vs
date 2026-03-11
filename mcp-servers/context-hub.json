@@ -1,0 +1,16 @@
+{
+  "context-hub": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@aisuite/chub", "mcp"],
+    "description": "Context Hub — curated API docs for 68+ services (OpenAI, Stripe, AWS, Anthropic, etc.)",
+    "access": "both",
+    "tools": [
+      "chub_search — Search docs/skills by query or tags",
+      "chub_get — Fetch doc/skill content by ID (with language/version)",
+      "chub_list — List all available entries",
+      "chub_annotate — Attach persistent notes to docs (agent learning)",
+      "chub_feedback — Rate docs up/down for maintainers"
+    ]
+  }
+}

@@ -8,7 +8,10 @@
       "Bash(pip install:*)",
       "Bash(find:*)",
       "WebSearch",
-      "WebFetch(domain:gist.github.com)"
+      "WebFetch(domain:gist.github.com)",
+      "Bash(mkdir:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:developers.openai.com)"
     ]
   }
 }

@@ -1,0 +1,12 @@
+{
+  "slack": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-slack"],
+    "env": {
+      "SLACK_BOT_TOKEN": "xoxb-YOUR_BOT_TOKEN_HERE",
+      "SLACK_TEAM_ID": "T00000000"
+    },
+    "access": "read"
+  }
+}

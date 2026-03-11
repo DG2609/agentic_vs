@@ -1,0 +1,11 @@
+{
+  "brave-search": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+    "env": {
+      "BRAVE_API_KEY": "BSA_YOUR_API_KEY_HERE"
+    },
+    "access": "read"
+  }
+}

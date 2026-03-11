@@ -455,10 +455,24 @@ if __name__ == "__main__":
         metavar="TOOLS",
         help="Comma-separated whitelist of tool names (default: all tools).",
     )
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Launch full-screen TUI mode (requires textual).",
+    )
+    parser.add_argument(
+        "--resume",
+        metavar="SESSION_ID",
+        help="Resume a previous session by ID.",
+    )
 
     args = parser.parse_args()
 
-    if args.prompt:
+    if args.tui:
+        # ── Full-screen TUI mode ─────────────────────────────
+        from tui import main as tui_main
+        tui_main()
+    elif args.prompt:
         # ── Headless / CI mode ───────────────────────────────
         from agent.headless import run_headless, print_result
 

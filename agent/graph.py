@@ -63,6 +63,10 @@ from agent.tools.code_quality import code_quality
 from agent.tools.dep_graph import dep_graph
 from agent.tools.context_build import context_build
 from agent.tools.skills import skill_invoke, skill_list, skill_create, hub_search, skill_install, skill_remove
+from agent.tools.voice import voice_input
+from agent.tools.image_input import image_input
+from agent.tools.snapshot_tools import snapshot_list, snapshot_revert, snapshot_info
+from agent.tools.context_hub import chub_search, chub_get, chub_annotate, chub_feedback
 from agent.tools.github import (
     github_list_issues, github_list_prs, github_get_pr,
     github_create_issue, github_create_pr, github_comment,
@@ -74,9 +78,12 @@ from agent.tools.gitlab import (
 from agent.skill_loader import load_skills as _load_skills
 from agent.plugin_registry import get_plugin_tools as _get_plugin_tools, list_plugins as _list_installed_plugins
 from agent.hooks import (
-    run_pre_hooks, run_post_hooks,
-    load_hooks_from_file, PRE_TOOL_HOOKS, POST_TOOL_HOOKS,
+    run_pre_hooks, run_post_hooks, register_hook,
+    load_hooks_from_file, PRE_TOOL_HOOKS, POST_TOOL_HOOKS, LIFECYCLE_HOOKS,
 )
+from agent.permissions import check_permission
+from agent.snapshots import create_snapshot
+from agent.context_providers import context_provider_hook
 from agent.mcp_client import load_mcp_tools as _load_mcp_tools
 import config
 
@@ -103,6 +110,9 @@ _CORE_TOOLS = [
     github_create_issue, github_create_pr, github_comment,
     gitlab_list_issues, gitlab_list_mrs, gitlab_get_mr,
     gitlab_create_issue, gitlab_create_mr, gitlab_comment,
+    voice_input, image_input,
+    snapshot_list, snapshot_revert, snapshot_info,
+    chub_search, chub_get, chub_annotate, chub_feedback,
 ]
 _all_core_names = {t.name for t in _CORE_TOOLS}
 _planner_skills, _coder_skills = _load_skills(existing_names=_all_core_names)
@@ -134,6 +144,12 @@ PLANNER_TOOLS = [
     todo_read, todo_write, plan_enter, plan_exit, question,
     # Skill system (markdown workflow skills + hub discovery)
     skill_invoke, skill_list, hub_search,
+    # Multimodal input
+    voice_input, image_input,
+    # Snapshot/revert
+    snapshot_list, snapshot_revert, snapshot_info,
+    # Context Hub — curated API docs (68+ services)
+    chub_search, chub_get, chub_annotate, chub_feedback,
     # GitHub (read-only)
     github_list_issues, github_list_prs, github_get_pr,
     # GitLab (read-only)
@@ -177,6 +193,49 @@ ALL_TOOLS = list({t.name: t for t in PLANNER_TOOLS + CODER_TOOLS}.values())
 # ── Load hooks from config ───────────────────────────────────
 if config.HOOKS_FILE:
     load_hooks_from_file(config.HOOKS_FILE)
+
+
+# ── Register built-in hooks ─────────────────────────────────
+
+# Context providers: expand @file:, @diff, @codebase: in user prompts
+register_hook(
+    event="user_prompt_submit",
+    handler=context_provider_hook,
+    name="context_providers",
+)
+
+# Snapshot: auto-backup files before write tools modify them
+_SNAPSHOT_TOOLS = frozenset({"file_write", "file_edit", "file_edit_batch"})
+
+
+async def _snapshot_pre_hook(tool_name: str, tool_args: dict):
+    """Pre-hook: create file snapshot before write operations."""
+    if tool_name not in _SNAPSHOT_TOOLS:
+        return None
+    file_path = tool_args.get("file_path", "")
+    if not file_path:
+        # file_edit_batch may have edits list
+        edits = tool_args.get("edits", [])
+        paths = [e.get("file_path", "") for e in edits if e.get("file_path")]
+        if paths:
+            try:
+                create_snapshot(paths, message=f"{tool_name} (batch: {len(paths)} files)")
+            except Exception:
+                pass
+        return None
+    try:
+        create_snapshot([file_path], message=f"{tool_name}: {file_path}")
+    except Exception:
+        pass
+    return None
+
+
+register_hook(
+    event="pre_tool_use",
+    pattern="file_*",
+    handler=_snapshot_pre_hook,
+    name="auto_snapshot",
+)
 
 
 class HookedToolNode:
@@ -254,6 +313,20 @@ class HookedToolNode:
 
             to_execute.append((i, tc_id, tool_name, effective_args, tool))
 
+        # ── Step 2b: Check permissions in parallel ────────────────
+        if to_execute:
+            perm_results = await asyncio.gather(*[
+                check_permission(name, args)
+                for _, _, name, args, _ in to_execute
+            ])
+            filtered = []
+            for (i, tc_id, name, args, tool), (allowed, reason) in zip(to_execute, perm_results):
+                if not allowed:
+                    pending[i] = (tc_id, name, f"[DENIED] {reason}")
+                else:
+                    filtered.append((i, tc_id, name, args, tool))
+            to_execute = filtered
+
         # ── Step 3: Execute all non-blocked tools in parallel ─────
         if to_execute:
             exec_results = await asyncio.gather(*[
@@ -323,7 +396,8 @@ def build_graph(checkpointer=None):
 
     # ── Add nodes ───────────────────────────────────────────
     graph.add_node("agent", partial(agent_node, llm_planner=llm_planner, llm_coder=llm_coder))
-    tool_node = HookedToolNode(ALL_TOOLS) if (PRE_TOOL_HOOKS or POST_TOOL_HOOKS) else ToolNode(ALL_TOOLS)
+    # Always use HookedToolNode — built-in hooks handle permissions & snapshots
+    tool_node = HookedToolNode(ALL_TOOLS)
     graph.add_node("tools", tool_node)
     graph.add_node("check_compact", lambda state: state)  # passthrough for routing
     graph.add_node("summarize", summarize_node)

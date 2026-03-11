@@ -1,0 +1,8 @@
+{
+  "filesystem": {
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"],
+    "access": "both"
+  }
+}
