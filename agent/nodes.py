@@ -22,6 +22,7 @@ from langchain_core.messages import (
 from models.state import AgentState
 import config
 from agent.tools.truncation import estimate_tokens
+from agent.team.coordinator import is_coordinator_mode, get_coordinator_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -498,6 +499,10 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
         system_content = CODER_PROMPT
         llm = llm_coder
 
+    # Coordinator mode overrides planner prompt
+    if getattr(state, 'coordinator_mode', False) or is_coordinator_mode():
+        system_content = get_coordinator_system_prompt()
+
     # Inject project rules
     rules = _load_project_rules(state.workspace or config.WORKSPACE_DIR)
     if rules:
@@ -514,7 +519,14 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     if state.workspace:
         system_content += f"\n\n## Current Workspace\n{state.workspace}"
 
-    full_messages = [SystemMessage(content=system_content)] + _prune_tool_outputs(messages)
+    # Inject pending team worker notifications as HumanMessages
+    notifications = getattr(state, 'team_notifications', [])
+    if notifications and (getattr(state, 'coordinator_mode', False) or is_coordinator_mode()):
+        extra_messages = [HumanMessage(content=n) for n in notifications]
+        pruned = _prune_tool_outputs(messages)
+        full_messages = [SystemMessage(content=system_content)] + extra_messages + pruned
+    else:
+        full_messages = [SystemMessage(content=system_content)] + _prune_tool_outputs(messages)
 
     response = await _invoke_with_retry(llm, full_messages)
     response = _repair_tool_calls(response)

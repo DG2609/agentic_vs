@@ -67,6 +67,8 @@ from agent.tools.voice import voice_input
 from agent.tools.image_input import image_input
 from agent.tools.snapshot_tools import snapshot_list, snapshot_revert, snapshot_info
 from agent.tools.context_hub import chub_search, chub_get, chub_annotate, chub_feedback
+from agent.team.tools import TEAM_TOOLS
+from agent.team.coordinator import is_coordinator_mode, get_coordinator_system_prompt
 from agent.tools.github import (
     github_list_issues, github_list_prs, github_get_pr,
     github_create_issue, github_create_pr, github_comment,
@@ -148,6 +150,8 @@ PLANNER_TOOLS = [
     voice_input, image_input,
     # Snapshot/revert
     snapshot_list, snapshot_revert, snapshot_info,
+    # Agent Teams — coordinator tools (coordinator prompt activates their full use)
+    *TEAM_TOOLS,
     # Context Hub — curated API docs (68+ services)
     chub_search, chub_get, chub_annotate, chub_feedback,
     # GitHub (read-only)
