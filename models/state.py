@@ -44,3 +44,9 @@ class AgentState(BaseModel):
     # Checkpoint: list of completed step descriptions for resume
     completed_steps: list[str] = []
 
+    # ── Agent Teams / Coordinator mode ───────────────────────
+    # True when the agent is running as the coordinator lead
+    coordinator_mode: bool = False
+
+    # Buffer of incoming task-notification strings from workers
+    team_notifications: list[str] = Field(default_factory=list)
