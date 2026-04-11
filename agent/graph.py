@@ -368,6 +368,27 @@ class HookedToolNode:
         return {"messages": tool_messages}
 
 
+async def pump_notifications_node(state: AgentState) -> dict:
+    """Drain WorkerPool.notification_queue into state.team_notifications.
+
+    Runs as a graph node BEFORE agent_node so the coordinator sees
+    worker results on the next LLM turn.
+    """
+    if not is_coordinator_mode() and not getattr(state, 'coordinator_mode', False):
+        return {}
+    from agent.team.tools import _POOL
+    notifications = []
+    while True:
+        try:
+            notif = _POOL.notification_queue.get_nowait()
+            notifications.append(notif)
+        except Exception:
+            break
+    if notifications:
+        return {"team_notifications": notifications}
+    return {}
+
+
 def should_compact(state: AgentState) -> str:
     """Check if conversation needs compaction via token estimation or message count."""
     # Token-based check (primary)
@@ -405,10 +426,13 @@ def build_graph(checkpointer=None):
     graph.add_node("tools", tool_node)
     graph.add_node("check_compact", lambda state: state)  # passthrough for routing
     graph.add_node("summarize", summarize_node)
+    # Notification pump: drains WorkerPool queue into state before each LLM turn
+    graph.add_node("pump_notifications", pump_notifications_node)
 
     # ── Add edges ───────────────────────────────────────────
-    # Start → agent
-    graph.set_entry_point("agent")
+    # Start → pump_notifications → agent
+    graph.set_entry_point("pump_notifications")
+    graph.add_edge("pump_notifications", "agent")
 
     # Agent → tools (if tool calls) or check compaction
     graph.add_conditional_edges(
@@ -420,8 +444,8 @@ def build_graph(checkpointer=None):
         },
     )
 
-    # Tools → agent (loop back)
-    graph.add_edge("tools", "agent")
+    # Tools → pump_notifications → agent (loop back, draining new worker notifications)
+    graph.add_edge("tools", "pump_notifications")
 
     # Check compaction → summarize or end
     graph.add_conditional_edges(

@@ -521,10 +521,12 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
 
     # Inject pending team worker notifications as HumanMessages
     notifications = getattr(state, 'team_notifications', [])
+    injected_notifications = False
     if notifications and (getattr(state, 'coordinator_mode', False) or is_coordinator_mode()):
         extra_messages = [HumanMessage(content=n) for n in notifications]
         pruned = _prune_tool_outputs(messages)
         full_messages = [SystemMessage(content=system_content)] + extra_messages + pruned
+        injected_notifications = True
     else:
         full_messages = [SystemMessage(content=system_content)] + _prune_tool_outputs(messages)
 
@@ -544,12 +546,18 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     new_turns = state.session_turns + 1
     new_tokens = state.total_tokens_used + turn_tokens
 
-    return {
+    result = {
         "messages": [response],
         "active_agent": active_agent,
         "session_turns": new_turns,
         "total_tokens_used": new_tokens,
     }
+
+    # Clear injected notifications to prevent replay on the next turn
+    if injected_notifications:
+        result["team_notifications"] = []
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────

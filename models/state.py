@@ -7,6 +7,11 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
 
+def _append_notifications(left: list[str], right: list[str]) -> list[str]:
+    """Reducer: append new notifications to existing ones."""
+    return left + right
+
+
 class AgentState(BaseModel):
     """
     State schema for the LangGraph agent.
@@ -49,4 +54,4 @@ class AgentState(BaseModel):
     coordinator_mode: bool = False
 
     # Buffer of incoming task-notification strings from workers
-    team_notifications: list[str] = Field(default_factory=list)
+    team_notifications: Annotated[list[str], _append_notifications] = Field(default_factory=list)
