@@ -305,9 +305,12 @@ class StatusBar(Static):
 
     def render(self) -> Text:
         t = Text()
-        # Agent mode
-        color = AGENT_COLORS.get(self.agent, "white")
-        t.append(f" {self.agent.upper()} ", style=f"reverse bold {color}")
+        # Agent mode — show COORDINATOR badge when coordinator mode is active
+        if config.COORDINATOR_MODE:
+            t.append(" COORDINATOR ", style="reverse bold magenta")
+        else:
+            color = AGENT_COLORS.get(self.agent, "white")
+            t.append(f" {self.agent.upper()} ", style=f"reverse bold {color}")
         t.append("  ", style="dim")
         # Provider + model
         t.append(f"{config.LLM_PROVIDER.upper()}", style="bold")
@@ -403,6 +406,32 @@ class ToolSidebar(Vertical):
             if child.label.plain == short:
                 return
         tree.root.add_leaf(short)
+
+    def refresh_workers(self) -> None:
+        """Show last 5 workers from the coordinator pool (coordinator mode only)."""
+        if not config.COORDINATOR_MODE:
+            return
+        try:
+            from agent.team.tools import _POOL
+        except ImportError:
+            return
+        status_icons = {
+            "running": "⚡",
+            "completed": "✅",
+            "failed": "❌",
+            "stopped": "⏹",
+        }
+        workers = _POOL.list_workers()[-5:]
+        if not workers:
+            return
+        log = self.query_one("#tool-log", RichLog)
+        log.write(Text("  [Workers]", style="bold magenta"))
+        for w in workers:
+            icon = status_icons.get(w["status"], "?")
+            desc = w["description"][:25]
+            line = f"  {icon} [{w['role']}] {desc} ({w['status']})"
+            style = "magenta" if w["status"] == "running" else "dim"
+            log.write(Text(line, style=style))
 
 
 # ── Chat Input Widget ──────────────────────────────────────
