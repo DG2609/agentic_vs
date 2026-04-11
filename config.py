@@ -176,6 +176,24 @@ class Settings(BaseSettings):
         default_factory=lambda: ["AGENTS.md", "CLAUDE.md", "COPILOT.md", ".cursorrules"]
     )
 
+    # ── Agent Teams ──────────────────────────────────────────
+    COORDINATOR_MODE: bool = Field(
+        default=False,
+        description="Activate coordinator multi-agent mode (set by --team flag).",
+    )
+    TEAM_MAX_RETRIES: int = Field(
+        default=3, ge=1, le=10,
+        description="Max review-and-retry cycles per implementation worker.",
+    )
+    TEAM_WORKER_MAX_STEPS: int = Field(
+        default=30, ge=5, le=100,
+        description="Max LLM steps per worker before forced stop.",
+    )
+    TEAM_SCRATCHPAD_DIR: str = Field(
+        default=".shadowdev/team/scratchpad",
+        description="Shared scratchpad directory for cross-worker knowledge.",
+    )
+
     @field_validator("WORKSPACE_DIR")
     @classmethod
     def ensure_workspace_exists(cls, v):
@@ -300,3 +318,8 @@ PRUNE_MINIMUM = _settings.PRUNE_MINIMUM
 PRUNE_PROTECT = _settings.PRUNE_PROTECT
 MODEL_CONTEXT_LIMITS = _settings.MODEL_CONTEXT_LIMITS
 RULES_FILENAMES = _settings.RULES_FILENAMES
+
+COORDINATOR_MODE = _settings.COORDINATOR_MODE
+TEAM_MAX_RETRIES = _settings.TEAM_MAX_RETRIES
+TEAM_WORKER_MAX_STEPS = _settings.TEAM_WORKER_MAX_STEPS
+TEAM_SCRATCHPAD_DIR = _settings.TEAM_SCRATCHPAD_DIR
