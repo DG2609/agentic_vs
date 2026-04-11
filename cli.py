@@ -465,8 +465,21 @@ if __name__ == "__main__":
         metavar="SESSION_ID",
         help="Resume a previous session by ID.",
     )
+    parser.add_argument(
+        "--team",
+        action="store_true",
+        help="Activate coordinator mode — lead agent manages async worker team.",
+    )
 
     args = parser.parse_args()
+
+    if args.team:
+        import config as _cfg
+        _cfg.COORDINATOR_MODE = True
+        from agent.graph import build_graph as _bg
+        from langgraph.checkpoint.memory import MemorySaver as _MS
+        graph = _bg(checkpointer=_MS())
+        console.print("[bold magenta]🤝 Coordinator mode active — leading agent team[/bold magenta]")
 
     if args.tui:
         # ── Full-screen TUI mode ─────────────────────────────
