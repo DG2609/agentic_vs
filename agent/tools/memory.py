@@ -11,9 +11,14 @@ import sqlite3
 import threading
 import time
 from langchain_core.tools import tool
+from pydantic import BaseModel, Field
 
 import config
 from models.tool_schemas import MemorySaveArgs, MemorySearchArgs, MemoryDeleteArgs, MemoryListArgs
+
+# ── Limits ────────────────────────────────────────────────────
+MAX_MEMORY_ENTRIES = 10_000  # prune oldest when exceeded
+MAX_MEMORY_SIZE_MB = 50      # warn if DB file exceeds this
 
 _logger = logging.getLogger(__name__)
 
@@ -83,6 +88,46 @@ except Exception:
     pass  # non-fatal: tools will report errors gracefully
 
 
+def _prune_if_needed() -> None:
+    """Prune oldest entries when count exceeds MAX_MEMORY_ENTRIES.
+
+    Keeps the most recently accessed (updated_at) entries.
+    Also logs a warning if the DB file exceeds MAX_MEMORY_SIZE_MB.
+    """
+    try:
+        with _lock:
+            conn = _get_conn()
+            count = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
+            if count > MAX_MEMORY_ENTRIES:
+                excess = count - MAX_MEMORY_ENTRIES
+                # Delete the oldest entries (lowest updated_at)
+                conn.execute(
+                    """
+                    DELETE FROM memory WHERE key IN (
+                        SELECT key FROM memory ORDER BY updated_at ASC LIMIT ?
+                    )
+                    """,
+                    (excess,),
+                )
+                conn.commit()
+                _logger.info("[memory] Pruned %d old entries (limit=%d)", excess, MAX_MEMORY_ENTRIES)
+            conn.close()
+
+        # Size check (non-blocking)
+        try:
+            size_mb = os.path.getsize(_DB_PATH) / (1024 * 1024)
+            if size_mb > MAX_MEMORY_SIZE_MB:
+                _logger.warning(
+                    "[memory] DB size %.1f MB exceeds limit (%d MB). "
+                    "Consider running memory_delete to clean up.",
+                    size_mb, MAX_MEMORY_SIZE_MB,
+                )
+        except OSError:
+            pass
+    except Exception as e:
+        _logger.warning("[memory] _prune_if_needed failed: %s", e)
+
+
 # ── Tools ─────────────────────────────────────────────────────
 
 @tool(args_schema=MemorySaveArgs)
@@ -135,6 +180,8 @@ def memory_save(key: str, value: str, tags: list = None) -> str:
         warning = ""
         if any(s in value.lower() for s in _sensitive):
             warning = "\n⚠️  Warning: value may contain sensitive data (stored as plaintext)."
+        # Prune if entry count exceeds limit
+        _prune_if_needed()
         return f"✅ Memory '{key}' saved ({len(value)} chars){tag_str}{warning}"
     except Exception as e:
         return f"❌ Error saving memory: {e}"
@@ -306,3 +353,132 @@ def _human_age(ts: float) -> str:
     if delta < 86400:
         return f"{int(delta / 3600)}h ago"
     return f"{int(delta / 86400)}d ago"
+
+
+# ── Export / Import ───────────────────────────────────────────
+
+class MemoryExportArgs(BaseModel):
+    file_path: str = Field(
+        description="Destination JSON file path to write all memory entries."
+    )
+
+
+class MemoryImportArgs(BaseModel):
+    file_path: str = Field(
+        description="Source JSON file path exported by memory_export."
+    )
+
+
+@tool(args_schema=MemoryExportArgs)
+def memory_export(file_path: str) -> str:
+    """Export all memory entries to a JSON file for backup or migration.
+
+    Args:
+        file_path: Destination path for the JSON export file.
+
+    Returns:
+        Confirmation with entry count and file path.
+    """
+    try:
+        with _lock:
+            conn = _get_conn()
+            rows = conn.execute(
+                "SELECT key, value, tags, created_at, updated_at FROM memory ORDER BY updated_at DESC"
+            ).fetchall()
+            conn.close()
+
+        entries = [
+            {
+                "key": row["key"],
+                "value": row["value"],
+                "tags": json.loads(row["tags"] or "[]"),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+        export_data = {
+            "exported_at": time.time(),
+            "count": len(entries),
+            "entries": entries,
+        }
+
+        dest = os.path.abspath(file_path)
+        os.makedirs(os.path.dirname(dest) if os.path.dirname(dest) else ".", exist_ok=True)
+        with open(dest, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, indent=2, ensure_ascii=False)
+
+        return f"✅ Exported {len(entries)} memory entries to {dest}"
+    except Exception as e:
+        return f"❌ Error exporting memory: {e}"
+
+
+@tool(args_schema=MemoryImportArgs)
+def memory_import(file_path: str) -> str:
+    """Import memory entries from a JSON file created by memory_export.
+
+    Deduplicates by key — existing entries are NOT overwritten unless the
+    import entry has a newer updated_at timestamp.
+
+    Args:
+        file_path: Path to the JSON file to import.
+
+    Returns:
+        Summary of imported, skipped, and updated entries.
+    """
+    try:
+        src = os.path.abspath(file_path)
+        if not os.path.isfile(src):
+            return f"❌ File not found: {src}"
+
+        with open(src, encoding="utf-8") as f:
+            data = json.load(f)
+
+        entries = data.get("entries", [])
+        if not entries:
+            return "⚠️ No entries found in the export file."
+
+        imported = skipped = updated = 0
+        now = time.time()
+
+        with _lock:
+            conn = _get_conn()
+            for entry in entries:
+                key = entry.get("key", "")
+                value = entry.get("value", "")
+                tags = json.dumps(entry.get("tags", []))
+                created_at = entry.get("created_at", now)
+                updated_at = entry.get("updated_at", now)
+
+                if not key:
+                    skipped += 1
+                    continue
+
+                existing = conn.execute(
+                    "SELECT updated_at FROM memory WHERE key = ?", (key,)
+                ).fetchone()
+
+                if existing is None:
+                    conn.execute(
+                        "INSERT INTO memory (key, value, tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                        (key, value, tags, created_at, updated_at),
+                    )
+                    imported += 1
+                elif updated_at > existing["updated_at"]:
+                    conn.execute(
+                        "UPDATE memory SET value=?, tags=?, updated_at=? WHERE key=?",
+                        (value, tags, updated_at, key),
+                    )
+                    updated += 1
+                else:
+                    skipped += 1
+
+            conn.commit()
+            conn.close()
+
+        return (
+            f"✅ Memory import complete: {imported} new, {updated} updated, {skipped} skipped"
+        )
+    except Exception as e:
+        return f"❌ Error importing memory: {e}"
