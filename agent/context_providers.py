@@ -80,7 +80,12 @@ def _read_file(path: str, workspace: str) -> str:
 
 def _git_diff(ref: Optional[str], workspace: str) -> str:
     """Run git diff and return output."""
-    if ref and not re.fullmatch(r'[a-zA-Z0-9._/~^@{}\-]+', ref):
+    # Validate ref: allow standard git ref chars; block path traversal (../) and
+    # any chars that could be misused even if passed as a subprocess argument.
+    if ref and (
+        not re.fullmatch(r'[a-zA-Z0-9._~^@{}\-/]+', ref)
+        or '..' in ref  # block path traversal sequences
+    ):
         return f"[Invalid git ref: {ref!r}]"
     cmd = ["git", "diff"]
     if ref:

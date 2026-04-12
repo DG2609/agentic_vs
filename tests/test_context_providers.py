@@ -41,6 +41,18 @@ class TestExpandContextMentions:
         result = expand_context_mentions("check @file:missing.py", workspace)
         assert "File not found" in result
 
+    def test_file_path_traversal_blocked(self, workspace):
+        """@file:../etc/passwd must be blocked — path traversal."""
+        from agent.context_providers import expand_context_mentions
+        result = expand_context_mentions("check @file:../etc/passwd", workspace)
+        assert "Access denied" in result or "File not found" in result
+
+    def test_file_absolute_outside_workspace_blocked(self, workspace):
+        """@file:/etc/passwd must be blocked — outside workspace."""
+        from agent.context_providers import expand_context_mentions
+        result = expand_context_mentions("check @file:/etc/passwd", workspace)
+        assert "Access denied" in result or "File not found" in result
+
     def test_big_file_truncated(self, workspace):
         from agent.context_providers import expand_context_mentions
         result = expand_context_mentions("check @file:big.txt", workspace)
@@ -70,6 +82,18 @@ class TestExpandContextMentions:
         with patch("agent.context_providers.subprocess.run", return_value=mock_result):
             result = expand_context_mentions("show @diff:HEAD~1", workspace)
         assert "git diff HEAD~1" in result
+
+    def test_diff_ref_injection_blocked(self, workspace):
+        """@diff:$(ls) should be rejected — command injection attempt."""
+        from agent.context_providers import expand_context_mentions
+        result = expand_context_mentions("show @diff:$(ls)", workspace)
+        assert "Invalid git ref" in result
+
+    def test_diff_ref_path_traversal_blocked(self, workspace):
+        """@diff:../../etc/passwd should be rejected — path traversal."""
+        from agent.context_providers import expand_context_mentions
+        result = expand_context_mentions("show @diff:../../etc/passwd", workspace)
+        assert "Invalid git ref" in result
 
     def test_diff_no_changes(self, workspace):
         from agent.context_providers import expand_context_mentions
