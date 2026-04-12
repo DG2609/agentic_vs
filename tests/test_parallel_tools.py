@@ -191,7 +191,7 @@ def test_pre_hook_blocks_one_tool_others_still_run():
     msgs = result["messages"]
     assert len(msgs) == 2
     assert msgs[0].content == "content"
-    assert "[BLOCKED" in msgs[1].content
+    assert "Blocked by hook" in msgs[1].content
     assert "write denied" in msgs[1].content
     t_write.ainvoke.assert_not_awaited()
 
@@ -211,7 +211,7 @@ def test_pre_hook_blocks_all_tools():
     result = asyncio.run(node(state))
 
     msgs = result["messages"]
-    assert all("[BLOCKED" in m.content for m in msgs)
+    assert all("Blocked by hook" in m.content for m in msgs)
     t1.ainvoke.assert_not_awaited()
     t2.ainvoke.assert_not_awaited()
 

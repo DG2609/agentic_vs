@@ -130,6 +130,13 @@ async def _run_shell_hook(hook: ToolHook, payload: dict) -> HookResult:
         stdin_data = json.dumps(payload).encode()
         stdout, stderr = await asyncio.wait_for(proc.communicate(stdin_data), timeout=10)
 
+        if proc.returncode == 2:
+            # Exit code 2 = block the tool execution
+            err = stderr.decode(errors="replace").strip()
+            reason = err or f"hook '{hook.name}' exited with code 2"
+            logger.info("[hooks] Shell hook '%s' blocked tool (exit 2): %s", hook.name, reason)
+            return HookResult(block=True, reason=reason)
+
         if proc.returncode != 0:
             err = stderr.decode(errors="replace").strip()
             logger.warning(f"[hooks] Shell hook '{hook.name}' exited {proc.returncode}: {err}")
@@ -163,7 +170,13 @@ async def _run_python_hook(hook: ToolHook, *args) -> HookResult:
         if isinstance(result, HookResult):
             return result
         if isinstance(result, dict):
-            return HookResult(**{k: v for k, v in result.items() if k in HookResult.__dataclass_fields__})
+            # Support {"blocked": True, "reason": "..."} shorthand from Python hooks
+            if result.get("blocked"):
+                reason = result.get("reason", f"blocked by hook '{hook.name}'")
+                return HookResult(block=True, reason=reason)
+            # Map remaining known fields
+            known = {k: v for k, v in result.items() if k in HookResult.__dataclass_fields__}
+            return HookResult(**known)
         return HookResult()
     except Exception as e:
         logger.warning(f"[hooks] Python hook '{hook.name}' error: {e}")

@@ -21,6 +21,7 @@ Upgraded with:
 import asyncio
 import json
 import logging
+import os
 from functools import partial
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -87,10 +88,14 @@ from agent.hooks import (
 from agent.permissions import check_permission
 from agent.snapshots import create_snapshot
 from agent.context_providers import context_provider_hook
-from agent.mcp_client import load_mcp_tools as _load_mcp_tools
+from agent.mcp_client import load_mcp_tools as _load_mcp_tools, MCP_EXTRA_TOOLS as _mcp_extra_tools
 import config
 
 logger = logging.getLogger(__name__)
+
+# ── Tool concurrency + timeout ───────────────────────────────
+_TOOL_SEMAPHORE = asyncio.Semaphore(int(os.getenv("SHADOWDEV_MAX_TOOL_CONCURRENCY", "10")))
+_TOOL_TIMEOUT_S = float(os.getenv("SHADOWDEV_TOOL_TIMEOUT_S", "120"))
 
 # ── Core tool set (used for skill dedup) ────────────────────
 _CORE_TOOLS = [
@@ -117,6 +122,7 @@ _CORE_TOOLS = [
     snapshot_list, snapshot_revert, snapshot_info,
     chub_search, chub_get, chub_annotate, chub_feedback,
     fork_session,
+    *_mcp_extra_tools,
 ]
 _all_core_names = {t.name for t in _CORE_TOOLS}
 _planner_skills, _coder_skills = _load_skills(existing_names=_all_core_names)
@@ -170,6 +176,8 @@ PLANNER_TOOLS = [
     *_plugin_planner,
     # MCP server tools (read/both access)
     *_mcp_planner_tools,
+    # MCP Resources + Prompts + health-check tools
+    *_mcp_extra_tools,
 ]
 
 CODER_TOOLS = PLANNER_TOOLS + [
@@ -267,20 +275,35 @@ class HookedToolNode:
         return bool(PRE_TOOL_HOOKS or POST_TOOL_HOOKS)
 
     async def _invoke_one(self, tool, args: dict) -> str:
-        """Invoke a single tool asynchronously, returning a string result."""
-        try:
-            if hasattr(tool, "ainvoke"):
-                result = await tool.ainvoke(args)
-            else:
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(None, tool.invoke, args)
-            if isinstance(result, str):
-                return result
-            if isinstance(result, (dict, list)):
-                return json.dumps(result)
-            return str(result)
-        except Exception as e:
-            return f"Error: {type(e).__name__}: {e}"
+        """Invoke a single tool asynchronously, returning a string result.
+
+        Enforces:
+        - Concurrency cap: at most _TOOL_SEMAPHORE slots run simultaneously.
+        - Per-tool timeout: raises ToolMessage with timeout notice if exceeded.
+        """
+        async with _TOOL_SEMAPHORE:
+            try:
+                async def _call():
+                    if hasattr(tool, "ainvoke"):
+                        result = await tool.ainvoke(args)
+                    else:
+                        loop = asyncio.get_running_loop()
+                        result = await loop.run_in_executor(None, tool.invoke, args)
+                    if isinstance(result, str):
+                        return result
+                    if isinstance(result, (dict, list)):
+                        return json.dumps(result)
+                    return str(result)
+
+                return await asyncio.wait_for(_call(), timeout=_TOOL_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                timeout_s = int(_TOOL_TIMEOUT_S)
+                logger.warning(
+                    "[tools] %s timed out after %ds", getattr(tool, "name", repr(tool)), timeout_s
+                )
+                return f"⏱ Tool timed out after {timeout_s}s"
+            except Exception as e:
+                return f"Error: {type(e).__name__}: {e}"
 
     async def __call__(self, state):
         if not self._has_hooks:
@@ -309,7 +332,9 @@ class HookedToolNode:
             tc_id = tc.get("id", "")
 
             if pre_result.block:
-                pending[i] = (tc_id, tool_name, f"[BLOCKED by hook] {pre_result.reason}")
+                block_reason = pre_result.reason or f"hook blocked '{tool_name}'"
+                logger.info("[tools] %s blocked by pre-tool hook: %s", tool_name, block_reason)
+                pending[i] = (tc_id, tool_name, f"🚫 Blocked by hook: {block_reason}")
                 continue
 
             effective_args = (
