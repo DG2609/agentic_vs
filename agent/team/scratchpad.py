@@ -6,6 +6,7 @@ Root defaults to config.TEAM_SCRATCHPAD_DIR relative to workspace.
 """
 import os
 import logging
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +24,12 @@ class Scratchpad:
         return os.path.join(self.root, safe)
 
     def write(self, filename: str, content: str) -> None:
-        """Write content to a named scratchpad file."""
+        """Write content to a named scratchpad file (atomic via tmp→replace)."""
         os.makedirs(self.root, exist_ok=True)
-        with open(self._path(filename), "w", encoding="utf-8") as f:
-            f.write(content)
+        path = Path(self._path(filename))
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
         logger.debug(f"[scratchpad] wrote {filename} ({len(content)} chars)")
 
     def read(self, filename: str) -> str:

@@ -85,9 +85,29 @@ export function getActiveDiagnostics(): DiagnosticInfo[] {
 }
 
 /**
+ * Check that a resolved file path is within the workspace root.
+ * Prevents path traversal attacks via @file:../../etc/passwd mentions.
+ */
+function isPathSafe(filePath: string, workspaceRoot: string): boolean {
+  try {
+    const resolved = fs.realpathSync(path.resolve(workspaceRoot, filePath));
+    const wsReal = fs.realpathSync(workspaceRoot);
+    return (
+      resolved.startsWith(wsReal + path.sep) || resolved === wsReal
+    );
+  } catch {
+    // If realpathSync fails (e.g. file doesn't exist yet), fall back to
+    // a lexical check using path.resolve to catch obvious traversals.
+    const resolved = path.resolve(workspaceRoot, filePath);
+    return resolved.startsWith(workspaceRoot + path.sep) || resolved === workspaceRoot;
+  }
+}
+
+/**
  * Resolve @file mentions in a prompt string.
  * Returns the prompt with @file replaced by a fenced code block containing
  * the first 200 lines of that file, or an error note if not found.
+ * Files outside the workspace root are denied for security.
  */
 export function resolveFileMentions(prompt: string): string {
   const workspaceRoot =
@@ -100,6 +120,11 @@ export function resolveFileMentions(prompt: string): string {
     const absPath = path.isAbsolute(filePath)
       ? filePath
       : path.join(workspaceRoot, filePath);
+
+    // Security: deny access to files outside workspace boundary
+    if (!isPathSafe(absPath, workspaceRoot)) {
+      return `@${filePath} *[Access denied: path is outside workspace]*`;
+    }
 
     try {
       const content = fs.readFileSync(absPath, "utf-8");

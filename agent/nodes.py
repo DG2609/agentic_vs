@@ -25,6 +25,7 @@ import config
 from agent.tools.truncation import estimate_tokens
 from agent.team.coordinator import is_coordinator_mode, get_coordinator_system_prompt
 from agent.rules_loader import load_project_rules
+from agent.tools.cost_tracker import cost_from_response
 
 logger = logging.getLogger(__name__)
 
@@ -599,13 +600,12 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     turn_tokens = _msg_tokens(response)
     try:
         # usage_metadata: {"input_tokens": N, "output_tokens": M, ...} (Anthropic/OpenAI)
+        # Use (x or 0) guards to handle None values for partial keys (e.g. only input_tokens)
         um = getattr(response, "usage_metadata", None)
         if um and isinstance(um, dict):
-            total_usage = um.get("total_tokens") or (
-                um.get("input_tokens", 0) + um.get("output_tokens", 0)
-            )
-            if total_usage > 0:
-                turn_tokens = total_usage
+            total = (um.get("input_tokens", 0) or 0) + (um.get("output_tokens", 0) or 0)
+            if total > 0:
+                turn_tokens = total
         elif um and hasattr(um, "total_tokens"):
             turn_tokens = um.total_tokens or turn_tokens
     except Exception:
@@ -613,11 +613,20 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     new_turns = state.session_turns + 1
     new_tokens = state.total_tokens_used + turn_tokens
 
+    # Track cost — determine active model name for pricing
+    try:
+        model_name = getattr(config, "LLM_MODEL", "")
+        turn_cost = cost_from_response(model_name, response)
+    except Exception:
+        turn_cost = 0.0
+    new_cost = getattr(state, "session_cost", 0.0) + turn_cost
+
     result = {
         "messages": [response],
         "active_agent": active_agent,
         "session_turns": new_turns,
         "total_tokens_used": new_tokens,
+        "session_cost": new_cost,
     }
 
     # Clear injected notifications to prevent replay on the next turn

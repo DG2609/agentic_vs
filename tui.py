@@ -540,6 +540,8 @@ class ShadowDevTUI(App):
         Binding("ctrl+q", "quit_app", "Quit", key_display="Ctrl+Q"),
         Binding("ctrl+l", "clear_chat", "Clear", key_display="Ctrl+L"),
         Binding("ctrl+n", "new_session", "New Session", key_display="Ctrl+N"),
+        Binding("ctrl+c", "cancel_agent", "Cancel", key_display="Ctrl+C", show=False),
+        Binding("escape", "cancel_agent", "Cancel", show=False),
     ]
 
     current_agent = reactive("planner")
@@ -556,7 +558,8 @@ class ShadowDevTUI(App):
         self.total_tokens = 0
         self.total_turns = 0
         self.total_cost = 0.0
-        self._abort_event: asyncio.Event | None = None
+        self._abort_event: asyncio.Event = asyncio.Event()
+        self._state_lock: asyncio.Lock = asyncio.Lock()
 
     def compose(self) -> ComposeResult:
         with Horizontal():
@@ -656,6 +659,7 @@ class ShadowDevTUI(App):
 
         # Run agent
         self.is_running = True
+        self._abort_event.clear()  # Reset abort flag for new message
         ci = self.query_one("#chat-input", ChatInput)
         ci.disable()
         sb = self.query_one("#status-bar", StatusBar)
@@ -722,6 +726,11 @@ class ShadowDevTUI(App):
             async for event in self.graph.astream_events(
                 input_state, config=graph_config, version="v2"
             ):
+                # Check for cancellation between each streaming chunk
+                if self._abort_event.is_set():
+                    chat.write(Text("  Cancelled.", style="bold yellow"))
+                    break
+
                 kind = event.get("event", "")
                 data = event.get("data", {})
 
@@ -774,21 +783,25 @@ class ShadowDevTUI(App):
 
                     if tool_name == "reply_to_user":
                         msg = args.get("message", "") if isinstance(args, dict) else ""
-                        if msg and run_id not in self.printed_replies:
+                        async with self._state_lock:
+                            already_printed = run_id in self.printed_replies
+                        if msg and not already_printed:
                             if buffer.strip():
                                 chat.write(Markdown(self._clean_buffer(buffer)))
                                 buffer = ""
                             chat.write(Markdown(str(msg)))
-                            self.printed_replies.add(run_id)
+                            async with self._state_lock:
+                                self.printed_replies.add(run_id)
                         continue
 
                     label = _tool_label(tool_name, args if isinstance(args, dict) else {})
                     sidebar.log_tool_start(label)
-                    self.active_tools[run_id] = {
-                        "start": time.time(),
-                        "tool_name": tool_name,
-                        "args": args if isinstance(args, dict) else {},
-                    }
+                    async with self._state_lock:
+                        self.active_tools[run_id] = {
+                            "start": time.time(),
+                            "tool_name": tool_name,
+                            "args": args if isinstance(args, dict) else {},
+                        }
 
                 # Tool END
                 elif kind == "on_tool_end":
@@ -798,17 +811,21 @@ class ShadowDevTUI(App):
                     args = data.get("input", {})
 
                     if tool_name == "reply_to_user":
-                        if run_id not in self.printed_replies:
+                        async with self._state_lock:
+                            already_printed = run_id in self.printed_replies
+                        if not already_printed:
                             msg = args.get("message", "") if isinstance(args, dict) else ""
                             if msg:
                                 if buffer.strip():
                                     chat.write(Markdown(self._clean_buffer(buffer)))
                                     buffer = ""
                                 chat.write(Markdown(str(msg)))
-                                self.printed_replies.add(run_id)
+                                async with self._state_lock:
+                                    self.printed_replies.add(run_id)
                         continue
 
-                    tool_info = self.active_tools.pop(run_id, None)
+                    async with self._state_lock:
+                        tool_info = self.active_tools.pop(run_id, None)
                     elapsed = time.time() - tool_info["start"] if tool_info else 0
                     elapsed_str = _fmt_elapsed(elapsed)
                     a = args if isinstance(args, dict) else {}
@@ -819,9 +836,11 @@ class ShadowDevTUI(App):
                     # Track modified files
                     if tool_name in ("file_edit", "file_write", "file_edit_batch"):
                         target = a.get("file_path", "")
-                        if target and target not in self.modified_files:
-                            self.modified_files.append(target)
-                            sidebar.add_file(target)
+                        if target:
+                            async with self._state_lock:
+                                if target not in self.modified_files:
+                                    self.modified_files.append(target)
+                                    sidebar.add_file(target)
 
                     # Show diffs inline
                     if tool_name in ("file_edit", "file_write"):
@@ -874,7 +893,8 @@ class ShadowDevTUI(App):
             self.notify(f"Error: {err_msg[:60]}", severity="error")
 
         finally:
-            self.active_tools.clear()
+            async with self._state_lock:
+                self.active_tools.clear()
             self.is_running = False
             sb.busy = False
             ci = self.query_one("#chat-input", ChatInput)
@@ -958,9 +978,11 @@ class ShadowDevTUI(App):
 
     def action_new_session(self) -> None:
         self.thread_id = str(uuid.uuid4())
+        # Note: no lock needed here since new_session is only callable when not running
         self.modified_files.clear()
         self.active_tools.clear()
         self.printed_replies.clear()
+        self._abort_event.clear()
         self.total_tokens = 0
         self.total_turns = 0
         self.total_cost = 0.0
@@ -984,6 +1006,12 @@ class ShadowDevTUI(App):
         tool_log.clear()
 
         self.notify(f"New session: {self.thread_id[:8]}...")
+
+    def action_cancel_agent(self) -> None:
+        """Cancel the running agent (Ctrl+C / Escape)."""
+        if self.is_running:
+            self._abort_event.set()
+            self.notify("Cancelling...", severity="warning")
 
     async def action_quit_app(self) -> None:
         if LIFECYCLE_HOOKS:
