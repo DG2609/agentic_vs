@@ -12,6 +12,7 @@ Upgraded with:
 import os
 import json
 import logging
+import random
 from langchain_core.messages import (
     SystemMessage,
     HumanMessage,
@@ -261,6 +262,7 @@ async def _invoke_with_retry(llm, messages: list, max_retries: int = _RETRY_MAX_
 
             if is_retryable and attempt < max_retries - 1:
                 wait_ms = min(_RETRY_BASE_MS * (2 ** attempt), _RETRY_MAX_MS)
+                wait_ms += random.uniform(0, 0.25 * wait_ms)
                 wait_s = wait_ms / 1000
                 logger.warning(
                     f"[llm] Retryable error attempt {attempt + 1}/{max_retries} "
@@ -665,6 +667,49 @@ The single most important next action, if it is clear.
 </summary>
 """
 
+def _collect_recent_file_paths(messages: list, max_files: int = 5) -> list[str]:
+    """Scan message history for file_read/file_write tool calls and return
+    the most-recently-used unique file paths (MRU last, deduplicated)."""
+    seen: dict[str, int] = {}  # path -> last-seen index
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, AIMessage):
+            continue
+        for tc in getattr(msg, "tool_calls", None) or []:
+            if tc.get("name") in ("file_read", "file_write"):
+                path = tc.get("args", {}).get("file_path", "")
+                if path:
+                    seen[path] = i  # overwrite with later index
+
+    # Sort by last-seen index ascending (MRU last)
+    sorted_paths = sorted(seen, key=lambda p: seen[p])
+    # Keep only the most recent max_files
+    return sorted_paths[-max_files:]
+
+
+def _build_file_restoration_messages(messages: list, max_files: int = 5) -> list:
+    """Return HumanMessages containing the current content of recently-used files.
+
+    Skips files that no longer exist on disk.
+    """
+    paths = _collect_recent_file_paths(messages, max_files=max_files)
+    restoration: list = []
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                # Cap at ~50 KB to stay within context budget
+                content = fh.read(50_000)
+            restoration.append(
+                HumanMessage(
+                    content=f"[Post-compact context] Contents of {path}:\n{content}"
+                )
+            )
+        except Exception:
+            pass
+    return restoration
+
+
 def _extract_compact_summary(raw: str) -> str:
     """Strip <analysis> block and unwrap <summary> tags — matches CC formatCompactSummary()."""
     # Remove <analysis>...</analysis>
@@ -676,6 +721,60 @@ def _extract_compact_summary(raw: str) -> str:
         return m.group(1).strip()
     # No tags — just return cleaned text (fallback for models that ignore format)
     return raw.strip()
+
+
+# ─────────────────────────────────────────────────────────────
+# Micro-compaction node (partial summary for recent overflow)
+# ─────────────────────────────────────────────────────────────
+# Soft threshold: condense when message count exceeds this but full
+# compaction hasn't triggered yet (i.e. < COMPACTION_THRESHOLD).
+_MICRO_COMPACT_THRESHOLD = 30
+
+
+async def micro_compact_node(state: AgentState) -> dict:
+    """Condense messages[10:-5] into a single AIMessage summary.
+
+    Triggers when len(messages) > 30 AND full compaction is NOT needed.
+    Keeps messages[0:10] (system + early context) and messages[-5:]
+    (recent turns) intact; collapses the middle into one summary line.
+    """
+    messages = list(state.messages)
+    n = len(messages)
+
+    # Only act when in the soft-overflow range
+    if n <= _MICRO_COMPACT_THRESHOLD or is_context_overflow(messages):
+        return {}
+
+    # Nothing to collapse if there aren't enough messages in the middle
+    if n <= 15:  # need at least head(10) + tail(5) + 1 middle message
+        return {}
+
+    head = messages[:10]
+    middle = messages[10:-5]
+    tail = messages[-5:]
+
+    # Build a compact one-line description of the middle messages
+    parts = []
+    for msg in middle:
+        content = getattr(msg, "content", "")
+        if isinstance(content, str) and content.strip():
+            snippet = content.strip()[:120].replace("\n", " ")
+            parts.append(f"[{type(msg).__name__}] {snippet}")
+        elif isinstance(content, list):
+            text = " ".join(str(c) for c in content)[:120].replace("\n", " ")
+            parts.append(f"[{type(msg).__name__}] {text}")
+
+    summary_content = (
+        f"[Micro-summary of steps 10–{n - 5}]: "
+        + "; ".join(parts)
+    )
+    micro_summary_msg = AIMessage(content=summary_content)
+
+    new_messages = head + [micro_summary_msg] + tail
+
+    # Replace all current messages with the condensed list
+    delete_msgs = [RemoveMessage(id=m.id) for m in messages if hasattr(m, "id") and m.id]
+    return {"messages": delete_msgs + new_messages}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -745,9 +844,14 @@ async def summarize_node(state: AgentState) -> dict:
     delete_messages = [RemoveMessage(id=m.id) for m in to_summarize
                        if hasattr(m, "id") and m.id]
 
+    # ── Post-compact file restoration ────────────────────────────
+    # Re-inject the content of the last 5 unique files that were
+    # read/written during the session, so the LLM retains file context.
+    restoration_messages = _build_file_restoration_messages(messages)
+
     result = {
         "summary": summary_text,
-        "messages": delete_messages,
+        "messages": delete_messages + restoration_messages,
     }
 
     if LIFECYCLE_HOOKS:

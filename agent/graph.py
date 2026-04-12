@@ -27,12 +27,12 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from langchain_core.messages import ToolMessage
 from models.state import AgentState
 from agent.nodes import (
-    agent_node, summarize_node, get_llm,
+    agent_node, summarize_node, micro_compact_node, get_llm,
     is_context_overflow,
 )
 from agent.tools.code_search import code_search, grep_search, batch_read
 from agent.tools.file_ops import (
-    file_read, file_write, file_list, file_edit, glob_search, file_edit_batch,
+    file_read, file_write, file_list, file_edit, glob_search, file_edit_batch, apply_patch,
 )
 from agent.tools.terminal import terminal_exec
 from agent.tools.code_analyzer import code_analyze
@@ -67,6 +67,7 @@ from agent.tools.voice import voice_input
 from agent.tools.image_input import image_input
 from agent.tools.snapshot_tools import snapshot_list, snapshot_revert, snapshot_info
 from agent.tools.context_hub import chub_search, chub_get, chub_annotate, chub_feedback
+from agent.tools.session_tools import fork_session
 from agent.team.tools import TEAM_TOOLS
 from agent.team.coordinator import is_coordinator_mode, get_coordinator_system_prompt
 from agent.tools.github import (
@@ -94,7 +95,7 @@ logger = logging.getLogger(__name__)
 # ── Core tool set (used for skill dedup) ────────────────────
 _CORE_TOOLS = [
     code_search, grep_search, batch_read, semantic_search, index_codebase,
-    file_read, file_write, file_list, file_edit, file_edit_batch, glob_search,
+    file_read, file_write, file_list, file_edit, file_edit_batch, glob_search, apply_patch,
     terminal_exec, code_analyze, webfetch, web_search,
     lsp_definition, lsp_references, lsp_hover, lsp_symbols, lsp_diagnostics,
     lsp_go_to_definition, lsp_find_references,
@@ -115,6 +116,7 @@ _CORE_TOOLS = [
     voice_input, image_input,
     snapshot_list, snapshot_revert, snapshot_info,
     chub_search, chub_get, chub_annotate, chub_feedback,
+    fork_session,
 ]
 _all_core_names = {t.name for t in _CORE_TOOLS}
 _planner_skills, _coder_skills = _load_skills(existing_names=_all_core_names)
@@ -132,6 +134,8 @@ PLANNER_TOOLS = [
     # Search & read
     code_search, grep_search, batch_read, semantic_search, index_codebase,
     file_read, glob_search, file_list, code_analyze, webfetch, web_search,
+    # Patch application (read-safe preview also useful for planner)
+    apply_patch,
     # Code insight
     code_quality, dep_graph, context_build,
     # LSP
@@ -150,6 +154,8 @@ PLANNER_TOOLS = [
     voice_input, image_input,
     # Snapshot/revert
     snapshot_list, snapshot_revert, snapshot_info,
+    # Session management
+    fork_session,
     # Agent Teams — coordinator tools (coordinator prompt activates their full use)
     *TEAM_TOOLS,
     # Context Hub — curated API docs (68+ services)
@@ -390,15 +396,28 @@ async def pump_notifications_node(state: AgentState) -> dict:
     return {}
 
 
+_MICRO_COMPACT_THRESHOLD = 30  # mirrors nodes.py constant
+
+
 def should_compact(state: AgentState) -> str:
-    """Check if conversation needs compaction via token estimation or message count."""
-    # Token-based check (primary)
+    """Check if conversation needs compaction via token estimation or message count.
+
+    Returns:
+        'summarize'     — full compaction (token overflow or message-count limit)
+        'micro_compact' — soft compaction (>30 messages, below full threshold)
+        END             — no compaction needed
+    """
+    # Token-based check (primary) — full compaction
     if is_context_overflow(state.messages):
         return "summarize"
 
-    # Fallback: message count
+    # Fallback: message count — full compaction
     if len(state.messages) > config.MAX_MESSAGES_BEFORE_SUMMARY:
         return "summarize"
+
+    # Soft limit: partial compaction for moderate overflow
+    if len(state.messages) > _MICRO_COMPACT_THRESHOLD:
+        return "micro_compact"
 
     return END
 
@@ -427,6 +446,7 @@ def build_graph(checkpointer=None):
     graph.add_node("tools", tool_node)
     graph.add_node("check_compact", lambda state: state)  # passthrough for routing
     graph.add_node("summarize", summarize_node)
+    graph.add_node("micro_compact", micro_compact_node)
     # Notification pump: drains WorkerPool queue into state before each LLM turn
     graph.add_node("pump_notifications", pump_notifications_node)
 
@@ -448,18 +468,22 @@ def build_graph(checkpointer=None):
     # Tools → pump_notifications → agent (loop back, draining new worker notifications)
     graph.add_edge("tools", "pump_notifications")
 
-    # Check compaction → summarize or end
+    # Check compaction → summarize, micro_compact, or end
     graph.add_conditional_edges(
         "check_compact",
         should_compact,
         {
             "summarize": "summarize",
+            "micro_compact": "micro_compact",
             END: END,
         },
     )
 
     # Summarize → end
     graph.add_edge("summarize", END)
+
+    # Micro-compact → pump_notifications → agent (resume conversation)
+    graph.add_edge("micro_compact", "pump_notifications")
 
     # ── Compile ─────────────────────────────────────────────
     compiled = graph.compile(checkpointer=checkpointer)
