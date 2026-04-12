@@ -29,7 +29,9 @@ access values:
 
 import asyncio
 import concurrent.futures
+import json
 import logging
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -300,3 +302,293 @@ def load_mcp_tools(mcp_servers: dict) -> tuple[list, list]:
     except Exception as exc:
         logger.error("Failed to load MCP tools: %s", exc, exc_info=True)
         return [], []
+
+
+# ── MCP Client Manager ────────────────────────────────────────
+
+_NOT_SUPPORTED = "Not supported by this MCP server version"
+
+_HEALTH_LOOP_TASK: Optional[asyncio.Task] = None
+
+
+class MCPClientManager:
+    """Manages persistent MCP client connections with Resources, Prompts, and health-check support.
+
+    Maintains a registry of server configs and connection state, exposing
+    async methods for list_resources / read_resource / list_prompts / get_prompt.
+    A background health-check loop pings every server every 60 s.
+    """
+
+    def __init__(self, mcp_servers: dict):
+        self._servers: dict[str, dict] = mcp_servers or {}
+        # server_name → "healthy" | "degraded" | "unknown"
+        self._status: dict[str, str] = {name: "unknown" for name in self._servers}
+
+    # ── Internal: open a short-lived session ─────────────────
+
+    @asynccontextmanager
+    async def _open_session(self, server_name: str):
+        """Async context manager that opens a ClientSession for the named server."""
+        if not _HAS_MCP:
+            raise RuntimeError("mcp package not installed")
+        cfg = self._servers.get(server_name)
+        if cfg is None:
+            raise KeyError(f"Unknown MCP server: {server_name!r}")
+        server_type = cfg.get("type", "stdio")
+
+        if server_type == "stdio":
+            command = cfg.get("command")
+            if not command:
+                raise ValueError(f"MCP server {server_name!r}: 'command' is required")
+            params = StdioServerParameters(
+                command=command,
+                args=cfg.get("args", []),
+                env=cfg.get("env") or None,
+            )
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+
+        elif server_type in ("sse", "http"):
+            if not _HAS_SSE:
+                raise RuntimeError("SSE transport unavailable. Install: pip install mcp[sse]")
+            url = cfg.get("url")
+            if not url:
+                raise ValueError(f"MCP server {server_name!r}: 'url' is required")
+            headers = cfg.get("headers") or {}
+            async with sse_client(url, headers=headers) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+        else:
+            raise ValueError(f"MCP server {server_name!r}: unknown type {server_type!r}")
+
+    # ── Resources ─────────────────────────────────────────────
+
+    async def list_resources(self, server_name: str) -> list[dict]:
+        """List available resources from an MCP server.
+
+        Returns a list of dicts with keys: uri, name, description, mimeType.
+        Returns a sentinel list if the server doesn't support resources.
+        """
+        try:
+            async with self._open_session(server_name) as session:
+                response = await session.list_resources()
+                result = []
+                for r in getattr(response, "resources", []):
+                    result.append({
+                        "uri": str(getattr(r, "uri", "")),
+                        "name": str(getattr(r, "name", "")),
+                        "description": str(getattr(r, "description", "") or ""),
+                        "mimeType": str(getattr(r, "mimeType", "") or ""),
+                    })
+                self._status[server_name] = "healthy"
+                return result
+        except AttributeError:
+            # Session doesn't expose list_resources
+            return [{"error": _NOT_SUPPORTED}]
+        except Exception as exc:
+            logger.warning("[mcp] list_resources '%s' failed: %s", server_name, exc)
+            self._status[server_name] = "degraded"
+            return [{"error": str(exc)}]
+
+    async def read_resource(self, server_name: str, uri: str) -> str:
+        """Read a resource by URI. Returns text content (or base64 blob fallback)."""
+        try:
+            async with self._open_session(server_name) as session:
+                response = await session.read_resource(uri)
+                parts = []
+                for content in getattr(response, "contents", []):
+                    if hasattr(content, "text") and content.text is not None:
+                        parts.append(content.text)
+                    elif hasattr(content, "blob") and content.blob is not None:
+                        parts.append(f"[blob:{getattr(content, 'mimeType', 'application/octet-stream')}]")
+                    else:
+                        parts.append(str(content))
+                self._status[server_name] = "healthy"
+                return "\n".join(parts) if parts else "(no content)"
+        except AttributeError:
+            return _NOT_SUPPORTED
+        except Exception as exc:
+            logger.warning("[mcp] read_resource '%s' uri=%r failed: %s", server_name, uri, exc)
+            self._status[server_name] = "degraded"
+            return f"[MCP error: {exc}]"
+
+    # ── Prompts ───────────────────────────────────────────────
+
+    async def list_prompts(self, server_name: str) -> list[dict]:
+        """List available prompt templates from an MCP server.
+
+        Returns a list of dicts with keys: name, description, arguments.
+        """
+        try:
+            async with self._open_session(server_name) as session:
+                response = await session.list_prompts()
+                result = []
+                for p in getattr(response, "prompts", []):
+                    args = []
+                    for a in getattr(p, "arguments", []) or []:
+                        args.append({
+                            "name": str(getattr(a, "name", "")),
+                            "description": str(getattr(a, "description", "") or ""),
+                            "required": bool(getattr(a, "required", False)),
+                        })
+                    result.append({
+                        "name": str(getattr(p, "name", "")),
+                        "description": str(getattr(p, "description", "") or ""),
+                        "arguments": args,
+                    })
+                self._status[server_name] = "healthy"
+                return result
+        except AttributeError:
+            return [{"error": _NOT_SUPPORTED}]
+        except Exception as exc:
+            logger.warning("[mcp] list_prompts '%s' failed: %s", server_name, exc)
+            self._status[server_name] = "degraded"
+            return [{"error": str(exc)}]
+
+    async def get_prompt(self, server_name: str, prompt_name: str, arguments: dict | None = None) -> str:
+        """Get a rendered prompt template. Returns the messages as plain text."""
+        if arguments is None:
+            arguments = {}
+        try:
+            async with self._open_session(server_name) as session:
+                response = await session.get_prompt(prompt_name, arguments)
+                parts = []
+                for msg in getattr(response, "messages", []):
+                    role = getattr(msg, "role", "")
+                    content_obj = getattr(msg, "content", None)
+                    if content_obj is None:
+                        continue
+                    if hasattr(content_obj, "text"):
+                        text = content_obj.text
+                    else:
+                        text = str(content_obj)
+                    parts.append(f"[{role}] {text}")
+                self._status[server_name] = "healthy"
+                return "\n".join(parts) if parts else "(empty prompt)"
+        except AttributeError:
+            return _NOT_SUPPORTED
+        except Exception as exc:
+            logger.warning("[mcp] get_prompt '%s' prompt=%r failed: %s", server_name, prompt_name, exc)
+            self._status[server_name] = "degraded"
+            return f"[MCP error: {exc}]"
+
+    # ── Health check loop ─────────────────────────────────────
+
+    async def _health_loop(self):
+        """Background loop: ping every configured server every 60 s."""
+        while True:
+            await asyncio.sleep(60)
+            for name in list(self._servers):
+                try:
+                    async with self._open_session(name) as session:
+                        await asyncio.wait_for(session.send_ping(), timeout=5.0)
+                    self._status[name] = "healthy"
+                except Exception as exc:
+                    logger.warning("[mcp] server %s health check failed: %s", name, exc)
+                    self._status[name] = "degraded"
+
+    def start_health_loop(self):
+        """Schedule the health loop onto the running event loop (non-blocking)."""
+        global _HEALTH_LOOP_TASK
+        try:
+            loop = asyncio.get_running_loop()
+            _HEALTH_LOOP_TASK = loop.create_task(self._health_loop())
+        except RuntimeError:
+            # No running event loop — will be started lazily
+            pass
+
+
+# ── Singleton manager (populated lazily) ──────────────────────
+
+_MANAGER: Optional["MCPClientManager"] = None
+
+
+def get_manager() -> "MCPClientManager":
+    """Return the global MCPClientManager, initialised from config.MCP_SERVERS."""
+    global _MANAGER
+    if _MANAGER is None:
+        import config as _cfg
+        _MANAGER = MCPClientManager(_cfg.MCP_SERVERS)
+    return _MANAGER
+
+
+# ── LangChain tools: Resources ────────────────────────────────
+
+def _make_mcp_resource_tools() -> list:
+    """Build the mcp_list_resources and mcp_read_resource LangChain tools."""
+    from langchain_core.tools import tool as lc_tool
+    from agent.tools.truncation import truncate_output
+
+    @lc_tool
+    def mcp_list_resources(server_name: str) -> str:
+        """List available MCP resources from a named server.
+
+        Returns a JSON object containing:
+        - 'server': the server name
+        - 'status': current health status of the server
+        - 'resources': list of resource descriptors (uri, name, description, mimeType)
+        """
+        mgr = get_manager()
+        resources = _run_in_thread(mgr.list_resources(server_name))
+        output = {
+            "server": server_name,
+            "status": mgr._status.get(server_name, "unknown"),
+            "resources": resources,
+        }
+        return json.dumps(output, indent=2)
+
+    @lc_tool
+    def mcp_read_resource(server_name: str, uri: str) -> str:
+        """Read a resource by URI from a named MCP server. Returns text content (truncated to 50 KB)."""
+        mgr = get_manager()
+        content = _run_in_thread(mgr.read_resource(server_name, uri))
+        return truncate_output(content)
+
+    return [mcp_list_resources, mcp_read_resource]
+
+
+# ── LangChain tools: Prompts ──────────────────────────────────
+
+def _make_mcp_prompt_tools() -> list:
+    """Build the mcp_list_prompts and mcp_get_prompt LangChain tools."""
+    from langchain_core.tools import tool as lc_tool
+
+    @lc_tool
+    def mcp_list_prompts(server_name: str) -> str:
+        """List available MCP prompt templates from a named server. Returns JSON."""
+        mgr = get_manager()
+        prompts = _run_in_thread(mgr.list_prompts(server_name))
+        return json.dumps({"server": server_name, "prompts": prompts}, indent=2)
+
+    @lc_tool
+    def mcp_get_prompt(server_name: str, prompt_name: str, arguments: str = "{}") -> str:
+        """Render an MCP prompt template by name.
+
+        Args:
+            server_name: Name of the MCP server as configured in MCP_SERVERS.
+            prompt_name: Name of the prompt template to render.
+            arguments: JSON string of key/value arguments for the template (default "{}").
+
+        Returns the rendered messages as plain text, one per line prefixed with the role.
+        """
+        try:
+            args_dict = json.loads(arguments)
+            if not isinstance(args_dict, dict):
+                args_dict = {}
+        except (json.JSONDecodeError, ValueError):
+            args_dict = {}
+        mgr = get_manager()
+        return _run_in_thread(mgr.get_prompt(server_name, prompt_name, args_dict))
+
+    return [mcp_list_prompts, mcp_get_prompt]
+
+
+# ── Exported tool lists ───────────────────────────────────────
+
+MCP_RESOURCE_TOOLS: list = _make_mcp_resource_tools()
+MCP_PROMPT_TOOLS: list = _make_mcp_prompt_tools()
+# Combined convenience export
+MCP_EXTRA_TOOLS: list = MCP_RESOURCE_TOOLS + MCP_PROMPT_TOOLS
