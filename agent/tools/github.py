@@ -72,26 +72,69 @@ def _detect_repo(repo: str) -> str:
 
 
 def _request(method: str, path: str, **kwargs) -> dict | list:
-    """Make a GitHub API request; raise RuntimeError on failure."""
+    """Make a GitHub API request with rate-limit retry; raise RuntimeError on failure."""
+    import time as _time
+
     url = f"{_API_BASE}{path}"
-    try:
-        resp = requests.request(
-            method, url, headers=_headers(),
-            timeout=config.TOOL_TIMEOUT, **kwargs
-        )
-    except requests.RequestException as e:
-        raise RuntimeError(f"GitHub API request failed: {e}") from e
-
-    if not resp.ok:
+    _MAX_RETRIES = 3
+    for attempt in range(_MAX_RETRIES):
         try:
-            msg = resp.json().get("message", resp.text[:200])
-        except Exception:
-            msg = resp.text[:200]
-        raise RuntimeError(f"GitHub API error {resp.status_code}: {msg}")
+            resp = requests.request(
+                method, url, headers=_headers(),
+                timeout=config.TOOL_TIMEOUT, **kwargs
+            )
+        except requests.RequestException as e:
+            raise RuntimeError(f"GitHub API request failed: {e}") from e
 
-    if resp.status_code == 204:
-        return {}
-    return resp.json()
+        # Handle rate limiting (403 + X-RateLimit-Remaining: 0, or 429)
+        if resp.status_code in (403, 429):
+            remaining = resp.headers.get("X-RateLimit-Remaining", "")
+            retry_after = resp.headers.get("Retry-After", "")
+            reset_at = resp.headers.get("X-RateLimit-Reset", "")
+            if remaining == "0" or resp.status_code == 429:
+                if attempt < _MAX_RETRIES - 1:
+                    wait = 0
+                    if retry_after:
+                        try:
+                            wait = max(0, int(retry_after))
+                        except ValueError:
+                            pass
+                    if not wait and reset_at:
+                        try:
+                            wait = max(0, int(reset_at) - int(_time.time()) + 1)
+                        except ValueError:
+                            pass
+                    if not wait:
+                        wait = 60  # default: wait 60s
+                    if wait > 300:
+                        # Refuse to wait more than 5 minutes; surface the error instead
+                        break
+                    logger.warning("[github] Rate limited — retrying in %ds", wait)
+                    _time.sleep(wait)
+                    continue
+
+        if not resp.ok:
+            try:
+                msg = resp.json().get("message", resp.text[:200])
+            except Exception:
+                msg = resp.text[:200]
+            # Provide actionable error messages for common status codes
+            if resp.status_code == 401:
+                raise RuntimeError("GitHub API error 401: Unauthorized — check GITHUB_TOKEN")
+            if resp.status_code == 403:
+                raise RuntimeError(f"GitHub API error 403: Forbidden — {msg}")
+            if resp.status_code == 404:
+                raise RuntimeError(f"GitHub API error 404: Not found — {msg}")
+            if resp.status_code == 422:
+                raise RuntimeError(f"GitHub API error 422: Unprocessable — {msg}")
+            raise RuntimeError(f"GitHub API error {resp.status_code}: {msg}")
+
+        if resp.status_code == 204:
+            return {}
+        return resp.json()
+
+    # All retries exhausted
+    raise RuntimeError("GitHub API: rate limit exceeded and retry window too long")
 
 
 def _fmt_issue(issue: dict) -> str:

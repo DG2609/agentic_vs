@@ -100,28 +100,60 @@ def _detect_repo(repo: str) -> str:
 
 
 def _request(method: str, path: str, **kwargs) -> dict | list:
-    """Make a GitLab API request; raise RuntimeError on failure."""
+    """Make a GitLab API request with rate-limit retry; raise RuntimeError on failure."""
+    import time as _time
+
     url = f"{_api_base()}{path}"
-    try:
-        resp = requests.request(
-            method, url, headers=_headers(),
-            timeout=config.TOOL_TIMEOUT, **kwargs
-        )
-    except requests.RequestException as e:
-        raise RuntimeError(f"GitLab API request failed: {e}") from e
-
-    if not resp.ok:
+    _MAX_RETRIES = 3
+    for attempt in range(_MAX_RETRIES):
         try:
-            msg = resp.json().get("message", resp.text[:200])
-            if isinstance(msg, list):
-                msg = "; ".join(msg)
-        except Exception:
-            msg = resp.text[:200]
-        raise RuntimeError(f"GitLab API error {resp.status_code}: {msg}")
+            resp = requests.request(
+                method, url, headers=_headers(),
+                timeout=config.TOOL_TIMEOUT, **kwargs
+            )
+        except requests.RequestException as e:
+            raise RuntimeError(f"GitLab API request failed: {e}") from e
 
-    if resp.status_code == 204:
-        return {}
-    return resp.json()
+        # Handle rate limiting (429 Too Many Requests)
+        if resp.status_code == 429:
+            if attempt < _MAX_RETRIES - 1:
+                retry_after = resp.headers.get("Retry-After", "")
+                wait = 60  # default
+                if retry_after:
+                    try:
+                        wait = max(0, int(retry_after))
+                    except ValueError:
+                        pass
+                if wait > 300:
+                    break  # refuse to wait > 5 minutes
+                logger.warning("[gitlab] Rate limited — retrying in %ds", wait)
+                _time.sleep(wait)
+                continue
+
+        if not resp.ok:
+            try:
+                msg = resp.json().get("message", resp.text[:200])
+                if isinstance(msg, list):
+                    msg = "; ".join(msg)
+            except Exception:
+                msg = resp.text[:200]
+            # Provide actionable error messages for common status codes
+            if resp.status_code == 401:
+                raise RuntimeError("GitLab API error 401: Unauthorized — check GITLAB_TOKEN")
+            if resp.status_code == 403:
+                raise RuntimeError(f"GitLab API error 403: Forbidden — {msg}")
+            if resp.status_code == 404:
+                raise RuntimeError(f"GitLab API error 404: Not found — {msg}")
+            if resp.status_code == 422:
+                raise RuntimeError(f"GitLab API error 422: Unprocessable — {msg}")
+            raise RuntimeError(f"GitLab API error {resp.status_code}: {msg}")
+
+        if resp.status_code == 204:
+            return {}
+        return resp.json()
+
+    # All retries exhausted
+    raise RuntimeError("GitLab API: rate limit exceeded and retry window too long")
 
 
 def _fmt_issue(issue: dict) -> str:

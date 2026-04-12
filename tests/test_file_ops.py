@@ -122,6 +122,89 @@ def test_file_read_nonexistent(workspace):
 
 
 # ─────────────────────────────────────────────────────────────
+# Blocked device paths (CC parity)
+# ─────────────────────────────────────────────────────────────
+
+def test_file_read_blocks_dev_zero(workspace):
+    """file_read must block /dev/zero to prevent infinite-read hangs."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "/dev/zero"})
+    assert "not allowed" in result.lower() or "error" in result.lower()
+
+
+def test_file_read_blocks_dev_random(workspace):
+    """file_read must block /dev/random."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "/dev/random"})
+    assert "not allowed" in result.lower() or "error" in result.lower()
+
+
+def test_file_read_blocks_dev_urandom(workspace):
+    """file_read must block /dev/urandom."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "/dev/urandom"})
+    assert "not allowed" in result.lower() or "error" in result.lower()
+
+
+def test_file_read_blocks_dev_tty(workspace):
+    """file_read must block /dev/tty (blocks waiting for terminal input)."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "/dev/tty"})
+    assert "not allowed" in result.lower() or "error" in result.lower()
+
+
+def test_file_read_blocks_dev_console(workspace):
+    """file_read must block /dev/console."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "/dev/console"})
+    assert "not allowed" in result.lower() or "error" in result.lower()
+
+
+def test_file_read_blocks_dev_fd_0(workspace):
+    """file_read must block /dev/fd/0 (stdin alias)."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "/dev/fd/0"})
+    assert "not allowed" in result.lower() or "error" in result.lower()
+
+
+def test_file_read_blocks_proc_self_fd_0(workspace):
+    """file_read must block /proc/self/fd/0 (Linux stdin alias)."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "/proc/self/fd/0"})
+    assert "not allowed" in result.lower() or "error" in result.lower()
+
+
+def test_file_read_blocks_proc_pid_fd_1(workspace):
+    """file_read must block /proc/<pid>/fd/1 (Linux stdout alias)."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "/proc/12345/fd/1"})
+    assert "not allowed" in result.lower() or "error" in result.lower()
+
+
+# ─────────────────────────────────────────────────────────────
+# Atomic file_write
+# ─────────────────────────────────────────────────────────────
+
+def test_file_write_atomic(workspace):
+    """file_write should produce correct output even after atomic write."""
+    from agent.tools.file_ops import file_write, file_read
+    result = file_write.invoke({"file_path": "atomic_test.txt", "content": "hello atomic\n"})
+    assert "Written" in result
+    read_result = file_read.invoke({"file_path": "atomic_test.txt"})
+    assert "hello atomic" in read_result
+
+
+def test_file_write_no_temp_file_left(workspace):
+    """file_write must not leave .sdtmp_ temp files around."""
+    import glob as _glob
+    from agent.tools.file_ops import file_write
+    file_write.invoke({"file_path": "clean_write.txt", "content": "test"})
+    # No .sdtmp_ files should remain in the workspace
+    tmp_files = _glob.glob(os.path.join(workspace, ".sdtmp_*"))
+    assert tmp_files == [], f"Temp file(s) left behind: {tmp_files}"
+
+
+# ─────────────────────────────────────────────────────────────
 # Line-ending awareness in file_edit
 # ─────────────────────────────────────────────────────────────
 

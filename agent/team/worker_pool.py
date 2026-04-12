@@ -10,7 +10,7 @@ import logging
 import random
 import string
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 # Role → single-char prefix for human-readable worker IDs (CC-style)
@@ -107,7 +107,7 @@ class WorkerEntry:
     role: str
     task: asyncio.Task
     status: str = "running"
-    start_time: datetime = field(default_factory=datetime.utcnow)
+    start_time: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     steps: int = 0
     team: Optional[str] = None
     pending_messages: asyncio.Queue = field(default_factory=asyncio.Queue)
@@ -173,7 +173,7 @@ class WorkerPool:
         """Return summary of all workers."""
         result = []
         for w in self._workers.values():
-            elapsed = (datetime.utcnow() - w.start_time).seconds
+            elapsed = (datetime.now(timezone.utc) - w.start_time).seconds
             result.append({
                 "id": w.id,
                 "description": w.description,

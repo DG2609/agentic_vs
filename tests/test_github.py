@@ -104,6 +104,68 @@ def test_request_ok_returns_json():
     assert result[0]["number"] == 1
 
 
+def test_request_actionable_error_401():
+    """401 raises actionable error mentioning token check."""
+    from agent.tools.github import _request
+    mock_resp = MagicMock()
+    mock_resp.ok = False
+    mock_resp.status_code = 401
+    mock_resp.json.return_value = {"message": "Bad credentials"}
+    mock_resp.headers = {"X-RateLimit-Remaining": "10", "Retry-After": ""}
+    with patch("requests.request", return_value=mock_resp):
+        with patch("agent.tools.github._headers", return_value={}):
+            with pytest.raises(RuntimeError, match="Unauthorized"):
+                _request("GET", "/repos/x/y")
+
+
+def test_request_actionable_error_404():
+    """404 raises actionable error mentioning not found."""
+    from agent.tools.github import _request
+    mock_resp = MagicMock()
+    mock_resp.ok = False
+    mock_resp.status_code = 404
+    mock_resp.json.return_value = {"message": "Not Found"}
+    mock_resp.headers = {"X-RateLimit-Remaining": "10", "Retry-After": ""}
+    with patch("requests.request", return_value=mock_resp):
+        with patch("agent.tools.github._headers", return_value={}):
+            with pytest.raises(RuntimeError, match="Not found"):
+                _request("GET", "/repos/x/y")
+
+
+def test_request_rate_limit_retries_then_succeeds():
+    """429 rate limit: retries once, then succeeds on next attempt."""
+    from agent.tools.github import _request
+    rate_limited = MagicMock()
+    rate_limited.ok = False
+    rate_limited.status_code = 429
+    rate_limited.headers = {"Retry-After": "1"}
+
+    ok_resp = MagicMock()
+    ok_resp.ok = True
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"id": 42}
+
+    with patch("requests.request", side_effect=[rate_limited, ok_resp]):
+        with patch("agent.tools.github._headers", return_value={}):
+            with patch("time.sleep"):  # don't actually wait
+                result = _request("GET", "/repos/x/y")
+    assert result == {"id": 42}
+
+
+def test_request_rate_limit_too_long_raises():
+    """429 with Retry-After > 300 raises immediately (no long wait)."""
+    from agent.tools.github import _request
+    rate_limited = MagicMock()
+    rate_limited.ok = False
+    rate_limited.status_code = 429
+    rate_limited.headers = {"Retry-After": "600"}
+
+    with patch("requests.request", return_value=rate_limited):
+        with patch("agent.tools.github._headers", return_value={}):
+            with pytest.raises(RuntimeError, match="rate limit"):
+                _request("GET", "/repos/x/y")
+
+
 # ── Tool: github_list_issues ───────────────────────────────────
 
 def _mock_request(return_value):

@@ -594,8 +594,22 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
             elif tc.get("name") == "handoff_to_planner":
                 active_agent = "planner"
 
-    # Track token budget
+    # Track token budget — prefer actual API usage over estimation (CC approach)
+    # LangChain exposes this via response.usage_metadata or response.response_metadata
     turn_tokens = _msg_tokens(response)
+    try:
+        # usage_metadata: {"input_tokens": N, "output_tokens": M, ...} (Anthropic/OpenAI)
+        um = getattr(response, "usage_metadata", None)
+        if um and isinstance(um, dict):
+            total_usage = um.get("total_tokens") or (
+                um.get("input_tokens", 0) + um.get("output_tokens", 0)
+            )
+            if total_usage > 0:
+                turn_tokens = total_usage
+        elif um and hasattr(um, "total_tokens"):
+            turn_tokens = um.total_tokens or turn_tokens
+    except Exception:
+        pass  # estimation fallback is already set above
     new_turns = state.session_turns + 1
     new_tokens = state.total_tokens_used + turn_tokens
 

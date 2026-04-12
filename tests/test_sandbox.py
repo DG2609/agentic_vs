@@ -230,12 +230,14 @@ def test_terminal_falls_back_when_docker_unavailable():
 
 
 def test_terminal_direct_when_disabled():
-    """When SANDBOX_ENABLED=False, always uses direct subprocess."""
+    """When SANDBOX_ENABLED=False, always uses direct subprocess (via Popen)."""
     original = config.SANDBOX_ENABLED
     try:
         config.SANDBOX_ENABLED = False
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="direct output", stderr="")
+        mock_proc = MagicMock()
+        mock_proc.communicate.return_value = ("direct output", "")
+        mock_proc.returncode = 0
+        with patch("subprocess.Popen", return_value=mock_proc):
             from agent.tools.terminal import terminal_exec
             result = terminal_exec.invoke({"command": "echo direct", "cwd": "", "timeout": 0})
         assert "direct output" in result

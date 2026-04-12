@@ -205,6 +205,44 @@ class TestCCParityValidators:
         """Lowercase var at start (not matching [A-Z_]+) must not block."""
         assert safe("myvar=hello")
 
+    # 16. git config RCE keys
+    def test_git_fsmonitor_blocked(self):
+        assert _validate_command("git config core.fsmonitor /tmp/evil.sh") is not None
+
+    def test_git_hookspath_blocked(self):
+        assert _validate_command("git config core.hooksPath /tmp/hooks") is not None
+
+    def test_git_gitproxy_blocked(self):
+        assert _validate_command("git config core.gitProxy /tmp/proxy.sh") is not None
+
+    # 17. git --config-env flag
+    def test_git_config_env_blocked(self):
+        assert blocked("git --config-env=core.fsmonitor=MY_ENV status")
+
+    def test_git_config_env_space_blocked(self):
+        assert blocked("git --config-env core.hooksPath=X status")
+
+    def test_git_normal_status_safe(self):
+        assert safe("git status")
+
+    def test_git_log_safe(self):
+        assert safe("git log --oneline")
+
+    # 18. cd + git compound command
+    def test_cd_git_semicolon_blocked(self):
+        assert blocked("cd /malicious/dir; git status")
+
+    def test_cd_git_and_blocked(self):
+        assert blocked("cd /tmp/bare-repo && git status")
+
+    def test_git_alone_safe(self):
+        """Plain git command without cd is fine."""
+        assert safe("git status")
+
+    def test_cd_without_git_safe(self):
+        """cd without git is fine."""
+        assert safe("cd /tmp && ls")
+
 
 # ── Safe-command allow-list — regression guard ────────────────────────────────
 

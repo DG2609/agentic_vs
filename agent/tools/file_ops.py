@@ -13,6 +13,7 @@ import os
 import glob
 import difflib
 import pathlib
+import tempfile
 from pathlib import Path
 from langchain_core.tools import tool
 import config
@@ -61,8 +62,14 @@ PENDING_DIFFS: dict[str, dict[str, str]] = {}
 
 # Device paths that cause infinite reads / hangs — block them (CC: FileReadTool)
 _BLOCKED_DEVICE_PATHS = frozenset({
+    # Infinite output — never reach EOF
     "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom",
-    "/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr",
+    # Blocks waiting for input
+    "/dev/stdin", "/dev/tty", "/dev/console",
+    # Nonsensical to read
+    "/dev/null", "/dev/stdout", "/dev/stderr",
+    # fd aliases for stdin/stdout/stderr (Linux)
+    "/dev/fd/0", "/dev/fd/1", "/dev/fd/2",
 })
 
 # Bare git repo defense: block writes to .git internals that can enable RCE
@@ -115,6 +122,14 @@ def file_read(file_path: str, start_line: int = 0, end_line: int = 0) -> str:
     resolved_norm = resolved.replace("\\", "/")
     if any(resolved_norm == d or resolved_norm.startswith(d + "/") for d in _BLOCKED_DEVICE_PATHS):
         return f"Error: Reading '{file_path}' is not allowed (device path)."
+
+    # Block /proc/self/fd/0-2 and /proc/<pid>/fd/0-2 — Linux aliases for stdio
+    if resolved_norm.startswith("/proc/") and (
+        resolved_norm.endswith("/fd/0")
+        or resolved_norm.endswith("/fd/1")
+        or resolved_norm.endswith("/fd/2")
+    ):
+        return f"Error: Reading '{file_path}' is not allowed (stdio alias)."
 
     if not os.path.isfile(resolved):
         return f"Error: File '{file_path}' not found."
@@ -175,8 +190,21 @@ def file_write(file_path: str, content: str, create_dirs: bool = True) -> str:
             if parent:
                 os.makedirs(parent, exist_ok=True)
 
-        with open(resolved, "w", encoding="utf-8") as f:
-            f.write(content)
+        # Atomic write: write to a sibling temp file, then rename into place.
+        # This prevents partial-write corruption if the process is interrupted.
+        parent_dir = os.path.dirname(resolved) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=parent_dir, prefix=".sdtmp_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, resolved)  # atomic on POSIX; best-effort on Windows
+        except Exception:
+            # Clean up the temp file on error
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
         lines = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return f"✅ Written {lines} lines to {resolved}"
@@ -498,29 +526,40 @@ def file_edit_batch(edits: list) -> str:
             return f"❌ Batch aborted at edit #{idx + 1}: {_GIT_WRITE_BLOCKED_MSG}"
 
         try:
-            with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
+            # newline="" preserves raw line endings for accurate CRLF detection
+            with open(resolved, "r", encoding="utf-8", errors="ignore", newline="") as f:
                 content = f.read()
         except Exception as e:
             return f"❌ Batch aborted at edit #{idx + 1}: Cannot read '{file_path}': {e}. No files changed."
 
+        # Detect and normalize line endings (CRLF → LF for matching; restore on write)
+        original_le = "\r\n" if "\r\n" in content else "\n"
+        content_lf = content.replace("\r\n", "\n")
+        old_lf = old_string.replace("\r\n", "\n")
+        new_lf = new_string.replace("\r\n", "\n")
+
         # Apply matching strategies (same as file_edit)
-        new_content = _apply_edit(content, old_string, new_string)
-        if new_content is None:
+        new_content_lf = _apply_edit(content_lf, old_lf, new_lf)
+        if new_content_lf is None:
             # Provide helpful hint
-            hint = _edit_failed_hint(content, old_string, file_path)
+            hint = _edit_failed_hint(content_lf, old_lf, file_path)
             return (
                 f"❌ Batch aborted at edit #{idx + 1} ({file_path}):\n"
                 f"{hint}\nNo files changed."
             )
 
-        pending.append((resolved, file_path, content, new_content))
+        # Restore original line endings
+        new_content = new_content_lf.replace("\n", original_le)
+        pending.append((resolved, file_path, content, new_content, original_le))
 
     # Phase 2: write all with rollback on failure
     results = []
     written: list[tuple[str, str]] = []  # (resolved_path, original_content)
-    for resolved, file_path, old_content, new_content in pending:
+    for resolved, file_path, old_content, new_content, original_le in pending:
         try:
-            with open(resolved, "w", encoding="utf-8") as f:
+            # Use newline="" to prevent OS-level LF→CRLF translation on Windows;
+            # line endings are already encoded in new_content.
+            with open(resolved, "w", encoding="utf-8", newline="") as f:
                 f.write(new_content)
             written.append((resolved, old_content))
 
@@ -536,7 +575,7 @@ def file_edit_batch(edits: list) -> str:
             # Roll back all already-written files
             for r_path, original in written:
                 try:
-                    with open(r_path, "w", encoding="utf-8") as f:
+                    with open(r_path, "w", encoding="utf-8", newline="") as f:
                         f.write(original)
                 except Exception:
                     pass  # best-effort rollback
@@ -896,7 +935,9 @@ def apply_patch(patch: str, workspace: str = "") -> str:
             # File deletion
             if not os.path.isfile(resolved):
                 return f"❌ Error: Cannot delete '{target_path}': file not found."
-            pending.append((resolved, open(resolved, "r", encoding="utf-8", errors="ignore").read(), None))
+            with open(resolved, "r", encoding="utf-8", errors="ignore") as _f:
+                original_content = _f.read()
+            pending.append((resolved, original_content, None))
             continue
 
         if old_path is None:

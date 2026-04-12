@@ -125,6 +125,20 @@ def _validate_command(command: str) -> str | None:
     if _GIT_RCE_KEYS.search(command):
         return "Git config key blocked: core.fsmonitor/hooksPath/gitProxy can enable RCE"
 
+    # 17. git --config-env flag — allows injecting RCE-capable git config values via
+    #     environment variables (core.fsmonitor, diff.external, etc.). Block it entirely.
+    if re.search(r'\bgit\b.*--config-env[\s=]', command, re.IGNORECASE):
+        return _blocked("git --config-env flag — can inject RCE-capable config values via env vars")
+
+    # 18. cd + git compound command — can bypass bare-repo detection by first cd'ing into
+    #     a malicious directory that contains a bare git repo with core.fsmonitor.
+    #     CC blocks these as they require explicit approval.
+    #     Only block when semicolon/&&/|| joins a cd with a git command.
+    if re.search(r'\bcd\b', command) and re.search(r'\bgit\b', command):
+        # Check if cd and git appear in the same compound command (joined by ; && ||)
+        if re.search(r'\bcd\b.+(?:;|&&|\|\|).+\bgit\b|\bgit\b.+(?:;|&&|\|\|).+\bcd\b', command):
+            return _blocked("compound cd+git command — may bypass bare repository security checks")
+
     return None  # command passed all checks
 
 
@@ -164,35 +178,47 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
         # else: fall through to direct execution with a warning note
 
     # ── Direct execution ───────────────────────────────────────
+    proc = None
     try:
         # shell=True: command comes from the LLM/user request, not untrusted input.
         # Sandboxed via work_dir (workspace-bound cwd) and configurable timeout.
-        result = subprocess.run(
+        proc = subprocess.Popen(
             command,
             shell=True,
             cwd=work_dir,
-            capture_output=True,
-            text=True,
-            timeout=max_timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             encoding="utf-8",
             errors="replace",
         )
+        try:
+            stdout, stderr = proc.communicate(timeout=max_timeout)
+        except subprocess.TimeoutExpired:
+            # Kill the process tree — without this the child keeps running after
+            # communicate() raises, which leaks resources and can cause hangs.
+            proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except Exception:
+                stdout, stderr = "", ""
+            return f"Command timed out after {max_timeout}s: {command}"
 
+        returncode = proc.returncode
         status = (
-            f"Exit code: {result.returncode} ✅"
-            if result.returncode == 0
-            else f"Exit code: {result.returncode} ❌"
+            f"Exit code: {returncode} OK"
+            if returncode == 0
+            else f"Exit code: {returncode} ERROR"
         )
 
         # Keep stdout and stderr clearly separated.
         # Stderr is appended LAST so it's least likely to be truncated — it
         # usually contains the most useful diagnostic information on failure.
         sections = [status]
-        if result.stdout:
-            sections.append(result.stdout.rstrip())
-        if result.stderr:
-            sections.append(f"[STDERR]\n{result.stderr.rstrip()}")
-        if not result.stdout and not result.stderr:
+        if stdout:
+            sections.append(stdout.rstrip())
+        if stderr:
+            sections.append(f"[STDERR]\n{stderr.rstrip()}")
+        if not stdout and not stderr:
             sections.append("(no output)")
 
         raw = "\n\n".join(sections)
@@ -200,8 +226,6 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
         # Universal truncation — saves full output to disk if truncated
         return truncate_output(raw)
 
-    except subprocess.TimeoutExpired:
-        return f"⏱️ Command timed out after {max_timeout}s: {command}"
     except FileNotFoundError:
         return f"Error: Working directory '{work_dir}' not found."
     except Exception as e:
