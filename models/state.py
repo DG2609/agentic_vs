@@ -47,6 +47,7 @@ class AgentState(BaseModel):
     # Token budget tracking
     session_turns: int = 0          # number of LLM invocations this session
     total_tokens_used: int = 0      # estimated cumulative token usage
+    session_cost: float = 0.0       # cumulative USD cost for this session
 
     # Checkpoint: list of completed step descriptions for resume
     completed_steps: list[str] = []

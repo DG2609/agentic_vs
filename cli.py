@@ -29,6 +29,11 @@ import config
 from agent.graph import build_graph, ALL_TOOLS
 from agent.hooks import run_lifecycle_hook, LIFECYCLE_HOOKS
 from langgraph.checkpoint.memory import MemorySaver
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver as _SqliteSaver
+    _HAS_SQLITE_SAVER = True
+except ImportError:
+    _HAS_SQLITE_SAVER = False
 
 
 # ── Structured JSON log handler ─────────────────────────────
@@ -127,8 +132,21 @@ def _show_first_run_welcome(console: Console) -> None:
     _SHADOWDEV_DIR.mkdir(parents=True, exist_ok=True)
     _INITIALIZED_FLAG.touch()
 
-# Compile graph with in-memory persistence
-graph = build_graph(checkpointer=MemorySaver())
+# Compile graph — use SQLite persistence if available, fallback to in-memory
+def _make_checkpointer():
+    """Create a SQLite checkpointer for session persistence across restarts."""
+    if _HAS_SQLITE_SAVER:
+        import os
+        db_dir = _SHADOWDEV_DIR / "data"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        db_path = str(db_dir / "sessions.db")
+        try:
+            return _SqliteSaver.from_conn_string(db_path)
+        except Exception:
+            pass
+    return MemorySaver()
+
+graph = build_graph(checkpointer=_make_checkpointer())
 
 console = Console()
 style = Style.from_dict({'prompt': 'bold cyan'})
@@ -200,6 +218,21 @@ def _fmt_elapsed(seconds: float) -> str:
     else: return f"{seconds/60:.1f}m"
 
 
+# ── Streaming rate limiter ──────────────────────────────────
+_LAST_FLUSH = 0.0
+_MIN_FLUSH_INTERVAL = 0.05  # 50ms = max 20fps terminal updates
+
+
+def _should_flush() -> bool:
+    """Return True if enough time has passed since last flush (rate limiter)."""
+    global _LAST_FLUSH
+    now = time.time()
+    if now - _LAST_FLUSH >= _MIN_FLUSH_INTERVAL:
+        _LAST_FLUSH = now
+        return True
+    return False
+
+
 # ── Bottom Toolbar ──────────────────────────────────────────
 def bottom_toolbar():
     mode = current_agent_mode.upper()
@@ -238,10 +271,24 @@ def _(event):
 
 
 # ── Chat loop ───────────────────────────────────────────────
-async def chat_loop():
+async def chat_loop(resume_id: str = None):
     global current_agent_mode
     session = PromptSession(style=style, bottom_toolbar=bottom_toolbar, key_bindings=bindings)
-    thread_id = str(uuid.uuid4())
+    thread_id = resume_id if resume_id else str(uuid.uuid4())
+
+    # Session cost/usage tracking
+    _session_stats = {"turns": 0, "tokens": 0, "cost": 0.0}
+    if resume_id:
+        # Try to restore stats from existing session state
+        try:
+            state = graph.get_state({"configurable": {"thread_id": resume_id}})
+            if state and state.values:
+                sv = state.values
+                _session_stats["turns"] = sv.get("session_turns", 0)
+                _session_stats["tokens"] = sv.get("total_tokens_used", 0)
+                _session_stats["cost"] = sv.get("session_cost", 0.0)
+        except Exception:
+            pass
 
     # ── JSON structured logging ──────────────────────────────
     _setup_json_logging(thread_id)
@@ -282,7 +329,42 @@ async def chat_loop():
             active_agent_override = current_agent_mode
             input_text = user_input.strip()
             
-            if input_text.startswith('/fork'):
+            if input_text.strip() == "/sessions":
+                # List recent sessions from SQLite checkpointer
+                try:
+                    if hasattr(graph, "checkpointer") and hasattr(graph.checkpointer, "conn"):
+                        import sqlite3 as _sqlite3
+                        conn = graph.checkpointer.conn
+                        rows = conn.execute(
+                            "SELECT thread_id, MAX(checkpoint_ns) as latest "
+                            "FROM checkpoints GROUP BY thread_id ORDER BY latest DESC LIMIT 10"
+                        ).fetchall()
+                        if rows:
+                            console.print("  [bold]Recent sessions[/bold] (use --resume SESSION_ID):")
+                            for row in rows:
+                                tid = row[0]
+                                console.print(f"    {tid}")
+                        else:
+                            console.print("  No sessions found.")
+                    else:
+                        console.print("  [dim]Session listing requires SQLite checkpointer.[/dim]")
+                except Exception as e:
+                    console.print(f"  [red]Error listing sessions: {e}[/red]")
+                continue
+            elif input_text.strip() in ("/usage", "/cost"):
+                from agent.tools.cost_tracker import format_cost
+                cost_str = format_cost(_session_stats["cost"])
+                turns = _session_stats["turns"]
+                tokens = _session_stats["tokens"]
+                tokens_k = f"{tokens / 1000:.1f}K" if tokens >= 1000 else str(tokens)
+                console.print(
+                    f"  [bold]Session usage[/bold]  │  "
+                    f"Cost: [bold green]{cost_str}[/bold green]  │  "
+                    f"Turns: [bold]{turns}[/bold]  │  "
+                    f"Tokens: [bold]{tokens_k}[/bold]"
+                )
+                continue
+            elif input_text.startswith('/fork'):
                 # /fork [N]  — Fork current session at message N (default: now)
                 parts = input_text.split()
                 fork_at = -1
@@ -322,7 +404,7 @@ async def chat_loop():
                 if modified:
                     input_text = modified
 
-            await run_agent(input_text, thread_id, active_agent_override)
+            await run_agent(input_text, thread_id, active_agent_override, _session_stats)
 
             # ── Lifecycle: stop ──────────────────────────────
             if LIFECYCLE_HOOKS:
@@ -338,7 +420,7 @@ async def chat_loop():
 
 
 # ── Agent runner ────────────────────────────────────────────
-async def run_agent(message: str, thread_id: str, active_agent: str = None):
+async def run_agent(message: str, thread_id: str, active_agent: str = None, _session_stats: dict = None):
     graph_config = {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": 100,
@@ -392,13 +474,14 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None):
                             elif isinstance(block, dict) and block.get("type") == "text":
                                 buffer += block["text"]
                                 
-                    clean = buffer
-                    clean = re.sub(r'```json\s*\{\s*"name"[\s\S]*?(?:```|$)', '', clean, flags=re.IGNORECASE)
-                    clean = re.sub(r'\{\s*"name"\s*:\s*"[^"]+\"[\s\S]*?"arguments"\s*:[\s\S]*?(?:\}|$)', '', clean, flags=re.IGNORECASE)
-                    stripped = clean.strip()
-                    if stripped in ["{", "}", "{}", "{\n}", "{\n  \n}"]:
-                        clean = ""
-                    live_display.update(Markdown(clean.strip()))
+                    if _should_flush():
+                        clean = buffer
+                        clean = re.sub(r'```json\s*\{\s*"name"[\s\S]*?(?:```|$)', '', clean, flags=re.IGNORECASE)
+                        clean = re.sub(r'\{\s*"name"\s*:\s*"[^"]+\"[\s\S]*?"arguments"\s*:[\s\S]*?(?:\}|$)', '', clean, flags=re.IGNORECASE)
+                        stripped = clean.strip()
+                        if stripped in ["{", "}", "{}", "{\n}", "{\n  \n}"]:
+                            clean = ""
+                        live_display.update(Markdown(clean.strip()))
 
             # ── Tool START ──────────────────────────────────
             elif kind == "on_tool_start":
@@ -532,6 +615,18 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None):
             live_display.stop()
         print()
 
+    # Update session usage stats from graph state (best-effort)
+    if _session_stats is not None:
+        try:
+            state = graph.get_state({"configurable": {"thread_id": thread_id}})
+            if state and state.values:
+                sv = state.values
+                _session_stats["turns"] = sv.get("session_turns", _session_stats["turns"])
+                _session_stats["tokens"] = sv.get("total_tokens_used", _session_stats["tokens"])
+                _session_stats["cost"] = sv.get("session_cost", _session_stats["cost"])
+        except Exception:
+            pass
+
 
 if __name__ == "__main__":
     import argparse
@@ -659,4 +754,4 @@ if __name__ == "__main__":
         sys.exit(result.exit_code)
     else:
         # ── Interactive mode ─────────────────────────────────
-        asyncio.run(chat_loop())
+        asyncio.run(chat_loop(resume_id=args.resume))
