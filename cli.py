@@ -161,7 +161,7 @@ async def chat_loop():
     console.print(f"  [bold cyan]◆[/bold cyan] Workspace  [dim]│[/dim] [bold]{workspace}/[/bold]")
     console.print(f"  [bold cyan]◆[/bold cyan] Session    [dim]│[/dim] [dim]{thread_id[:8]}…[/dim]")
     console.print()
-    console.print("  [dim]Shortcuts: [bold]Alt+1[/bold] Plan │ [bold]Alt+2[/bold] Code │ [bold]Alt+3[/bold] Doc │ [bold]/plan /code /doc /exit[/bold][/dim]")
+    console.print("  [dim]Shortcuts: [bold]Alt+1[/bold] Plan │ [bold]Alt+2[/bold] Code │ [bold]Alt+3[/bold] Doc │ [bold]/plan /code /doc /fork [N] /exit[/bold][/dim]")
     console.print(f"  [dim]{'─' * 50}[/dim]")
     console.print()
 
@@ -177,7 +177,21 @@ async def chat_loop():
             active_agent_override = current_agent_mode
             input_text = user_input.strip()
             
-            if input_text.startswith('/plan'):
+            if input_text.startswith('/fork'):
+                # /fork [N]  — Fork current session at message N (default: now)
+                parts = input_text.split()
+                fork_at = -1
+                if len(parts) > 1:
+                    try:
+                        fork_at = int(parts[1])
+                    except ValueError:
+                        console.print(f"  [red]Usage: /fork [N]  (N = message index, default: end)[/red]")
+                        continue
+                from agent.tools.session_tools import fork_session as _fork_session
+                result = _fork_session.invoke({"session_id": thread_id, "fork_at": fork_at})
+                console.print(result)
+                continue
+            elif input_text.startswith('/plan'):
                 active_agent_override = "planner"
                 input_text = input_text[5:].strip()
             elif input_text.startswith('/code'):
@@ -470,6 +484,21 @@ if __name__ == "__main__":
         action="store_true",
         help="Activate coordinator mode — lead agent manages async worker team.",
     )
+    parser.add_argument(
+        "--improve",
+        metavar="GOAL",
+        help=(
+            "Run the autonomous improvement loop against the current workspace. "
+            "Provide a goal string, e.g. \"improve code quality and test coverage\"."
+        ),
+    )
+    parser.add_argument(
+        "--improve-rounds",
+        metavar="N",
+        type=int,
+        default=5,
+        help="Max improvement rounds (default: 5, used with --improve).",
+    )
 
     args = parser.parse_args()
 
@@ -481,7 +510,29 @@ if __name__ == "__main__":
         graph = _bg(checkpointer=_MS())
         console.print("[bold magenta]🤝 Coordinator mode active — leading agent team[/bold magenta]")
 
-    if args.tui:
+    if args.improve:
+        # ── Autonomous improvement loop ──────────────────────
+        import config as _cfg
+        workspace = _cfg.WORKSPACE_DIR or os.getcwd()
+        goal = args.improve
+        rounds = args.improve_rounds
+
+        console.print(
+            f"[bold cyan]🔄 Improvement loop starting[/bold cyan]\n"
+            f"  Goal   : {goal}\n"
+            f"  Rounds : {rounds}\n"
+            f"  Workspace: {workspace}"
+        )
+
+        from agent.team.improvement_loop import run_improvement_loop
+        summary = asyncio.run(run_improvement_loop(
+            goal=goal,
+            workspace=workspace,
+            max_rounds=rounds,
+        ))
+        console.print(f"\n[bold green]✓ Improvement loop complete[/bold green]\n{summary}")
+
+    elif args.tui:
         # ── Full-screen TUI mode ─────────────────────────────
         from tui import main as tui_main
         tui_main()

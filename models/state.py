@@ -1,7 +1,7 @@
 """
 LangGraph agent state definition using Pydantic + Annotated reducers.
 """
-from typing import Annotated
+from typing import Annotated, Optional
 from pydantic import BaseModel, Field
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
@@ -57,3 +57,10 @@ class AgentState(BaseModel):
 
     # Buffer of incoming task-notification strings from workers
     team_notifications: Annotated[list[str], _append_notifications] = Field(default_factory=list)
+
+    # ── Session Fork ──────────────────────────────────────────
+    # Set when this session is a fork of another session
+    parent_session_id: Optional[str] = None
+
+    # Message index in the parent session where the fork was created
+    fork_point: Optional[int] = None
