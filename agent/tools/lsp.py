@@ -206,12 +206,17 @@ class LSPClient:
                     "hover": {"contentFormat": ["plaintext", "markdown"]},
                     "definition": {"dynamicRegistration": False},
                     "references": {"dynamicRegistration": False},
+                    "implementation": {"dynamicRegistration": False},
                     "documentSymbol": {
                         "hierarchicalDocumentSymbolSupport": True,
                     },
                     "publishDiagnostics": {"relatedInformation": True},
                     "rename": {"prepareSupport": True},
-                }
+                    "callHierarchy": {"dynamicRegistration": False},
+                },
+                "workspace": {
+                    "symbol": {"dynamicRegistration": False},
+                },
             }
         })
         if result:
@@ -258,6 +263,29 @@ class LSPClient:
         return self.send_request("textDocument/documentSymbol", {
             "textDocument": {"uri": uri}
         })
+
+    def workspace_symbol(self, query: str):
+        return self.send_request("workspace/symbol", {"query": query})
+
+    def implementation(self, file_path: str, line: int, character: int):
+        uri = _file_uri(file_path)
+        return self.send_request("textDocument/implementation", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character}
+        })
+
+    def call_hierarchy_prepare(self, file_path: str, line: int, character: int):
+        uri = _file_uri(file_path)
+        return self.send_request("textDocument/prepareCallHierarchy", {
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character}
+        })
+
+    def call_hierarchy_incoming(self, item: dict):
+        return self.send_request("callHierarchy/incomingCalls", {"item": item})
+
+    def call_hierarchy_outgoing(self, item: dict):
+        return self.send_request("callHierarchy/outgoingCalls", {"item": item})
 
     def shutdown(self):
         if self.process and self.process.poll() is None:
@@ -610,3 +638,223 @@ def lsp_diagnostics(file_path: str) -> str:
         return "Error: Pyright analysis timed out"
     except Exception as e:
         return f"Error getting diagnostics: {e}"
+
+
+# ── New LSP tools (Fix 7) ──────────────────────────────────
+
+from models.tool_schemas import LSPWorkspaceSymbolArgs, LSPCallHierarchyItemArgs  # noqa: E402
+
+
+@tool(args_schema=LSPWorkspaceSymbolArgs)
+def lsp_workspace_symbols(query: str) -> str:
+    """Search for symbols across the entire workspace by name.
+
+    Useful for finding all classes, functions, or variables matching a query
+    without knowing which file they are in.
+
+    Args:
+        query: Search string to match against symbol names.
+
+    Returns:
+        List of matching symbols with file and line location.
+    """
+    client = get_pyright()
+    if client is None:
+        return _lsp_unavailable_reason or "LSP server not available."
+
+    try:
+        result = client.workspace_symbol(query)  # type: ignore[union-attr]
+        if isinstance(result, dict) and "error" in result:
+            return f"LSP Error: {result['error']}"
+
+        if not result:
+            return f"No workspace symbols found for '{query}'"
+
+        symbols = result if isinstance(result, list) else [result]
+        output = [f"Workspace symbols matching '{query}' ({len(symbols)}):\n"]
+        for sym in symbols[:100]:
+            name = sym.get("name", "?")
+            kind = SYMBOL_KINDS.get(sym.get("kind", 0), "?")
+            loc = sym.get("location", {})
+            uri = loc.get("uri", "")
+            file_path = _parse_uri(uri)
+            r = loc.get("range", {})
+            line = r.get("start", {}).get("line", 0) + 1
+            output.append(f"  {kind}: {name}  →  {file_path}:{line}")
+
+        return truncate_output("\n".join(output))
+    except Exception as e:
+        return f"LSP Error: {e}"
+
+
+@tool(args_schema=LSPPositionArgs)
+def lsp_go_to_implementation(file_path: str, line: int, col: int) -> str:
+    """Find implementations of an interface or abstract method at the given position.
+
+    Args:
+        file_path: Path to the file containing the interface/abstract method.
+        line: Line number (0-indexed).
+        col: Column number (0-indexed).
+
+    Returns:
+        Locations where the interface or abstract method is implemented.
+    """
+    client = get_pyright()
+    err = _ensure_open(client, file_path)
+    if err:
+        return err
+
+    try:
+        result = client.implementation(file_path, line, col)  # type: ignore[union-attr]
+        if isinstance(result, dict) and "error" in result:
+            return f"LSP Error: {result['error']}"
+
+        if not result:
+            return "No implementations found."
+
+        locs = result if isinstance(result, list) else [result]
+        output = [f"Implementations ({len(locs)}):"]
+        output.append(_format_locations(locs))
+        return "\n".join(output)
+    except Exception as e:
+        return f"LSP Error: {e}"
+
+
+@tool(args_schema=LSPPositionArgs)
+def lsp_call_hierarchy_prepare(file_path: str, line: int, col: int) -> str:
+    """Prepare call hierarchy at the cursor position.
+
+    Returns a JSON CallHierarchyItem that can be passed to
+    lsp_incoming_calls or lsp_outgoing_calls.
+
+    Args:
+        file_path: Path to the file.
+        line: Line number (0-indexed).
+        col: Column number (0-indexed).
+
+    Returns:
+        JSON string of the CallHierarchyItem, or an error message.
+    """
+    client = get_pyright()
+    err = _ensure_open(client, file_path)
+    if err:
+        return err
+
+    try:
+        result = client.call_hierarchy_prepare(file_path, line, col)  # type: ignore[union-attr]
+        if isinstance(result, dict) and "error" in result:
+            return f"LSP Error: {result['error']}"
+
+        if not result:
+            return "No call hierarchy item found at this position."
+
+        items = result if isinstance(result, list) else [result]
+        if not items:
+            return "No call hierarchy item found at this position."
+
+        item = items[0]
+        uri = item.get("uri", "")
+        name = item.get("name", "?")
+        kind = SYMBOL_KINDS.get(item.get("kind", 0), "?")
+        r = item.get("range", {})
+        line_no = r.get("start", {}).get("line", 0) + 1
+        file_p = _parse_uri(uri)
+        return (
+            f"Call hierarchy item: {kind} '{name}' at {file_p}:{line_no}\n"
+            f"JSON (pass to lsp_incoming_calls / lsp_outgoing_calls):\n"
+            f"{json.dumps(item)}"
+        )
+    except Exception as e:
+        return f"LSP Error: {e}"
+
+
+@tool(args_schema=LSPCallHierarchyItemArgs)
+def lsp_incoming_calls(item: str) -> str:
+    """Get all callers of a function (who calls this function).
+
+    Pass the JSON item string from lsp_call_hierarchy_prepare.
+
+    Args:
+        item: JSON-serialized CallHierarchyItem from lsp_call_hierarchy_prepare.
+
+    Returns:
+        List of functions that call the given function, with file:line locations.
+    """
+    client = get_pyright()
+    if client is None:
+        return _lsp_unavailable_reason or "LSP server not available."
+
+    try:
+        item_dict = json.loads(item)
+    except json.JSONDecodeError as e:
+        return f"Error: invalid JSON item — {e}"
+
+    try:
+        result = client.call_hierarchy_incoming(item_dict)  # type: ignore[union-attr]
+        if isinstance(result, dict) and "error" in result:
+            return f"LSP Error: {result['error']}"
+
+        if not result:
+            return "No incoming calls found."
+
+        calls = result if isinstance(result, list) else [result]
+        output = [f"Incoming calls ({len(calls)}):\n"]
+        for call in calls[:50]:
+            caller = call.get("from", {})
+            name = caller.get("name", "?")
+            kind = SYMBOL_KINDS.get(caller.get("kind", 0), "?")
+            uri = caller.get("uri", "")
+            file_p = _parse_uri(uri)
+            r = caller.get("range", {})
+            line_no = r.get("start", {}).get("line", 0) + 1
+            output.append(f"  {kind}: {name}  →  {file_p}:{line_no}")
+
+        return truncate_output("\n".join(output))
+    except Exception as e:
+        return f"LSP Error: {e}"
+
+
+@tool(args_schema=LSPCallHierarchyItemArgs)
+def lsp_outgoing_calls(item: str) -> str:
+    """Get all functions called by this function (what does this function call).
+
+    Pass the JSON item string from lsp_call_hierarchy_prepare.
+
+    Args:
+        item: JSON-serialized CallHierarchyItem from lsp_call_hierarchy_prepare.
+
+    Returns:
+        List of functions called by the given function, with file:line locations.
+    """
+    client = get_pyright()
+    if client is None:
+        return _lsp_unavailable_reason or "LSP server not available."
+
+    try:
+        item_dict = json.loads(item)
+    except json.JSONDecodeError as e:
+        return f"Error: invalid JSON item — {e}"
+
+    try:
+        result = client.call_hierarchy_outgoing(item_dict)  # type: ignore[union-attr]
+        if isinstance(result, dict) and "error" in result:
+            return f"LSP Error: {result['error']}"
+
+        if not result:
+            return "No outgoing calls found."
+
+        calls = result if isinstance(result, list) else [result]
+        output = [f"Outgoing calls ({len(calls)}):\n"]
+        for call in calls[:50]:
+            callee = call.get("to", {})
+            name = callee.get("name", "?")
+            kind = SYMBOL_KINDS.get(callee.get("kind", 0), "?")
+            uri = callee.get("uri", "")
+            file_p = _parse_uri(uri)
+            r = callee.get("range", {})
+            line_no = r.get("start", {}).get("line", 0) + 1
+            output.append(f"  {kind}: {name}  →  {file_p}:{line_no}")
+
+        return truncate_output("\n".join(output))
+    except Exception as e:
+        return f"LSP Error: {e}"

@@ -41,6 +41,8 @@ from agent.tools.semantic import semantic_search, index_codebase
 from agent.tools.web import webfetch
 from agent.tools.lsp import (
     lsp_definition, lsp_references, lsp_hover, lsp_symbols, lsp_diagnostics,
+    lsp_workspace_symbols, lsp_go_to_implementation,
+    lsp_call_hierarchy_prepare, lsp_incoming_calls, lsp_outgoing_calls,
 )
 from agent.tools.lsp_tools import lsp_go_to_definition, lsp_find_references
 from agent.tools.handoff import handoff_to_coder, handoff_to_planner
@@ -59,7 +61,7 @@ from agent.tools.git import (
     git_push, git_pull, git_fetch, git_merge,
 )
 from agent.tools.test_runner import run_tests
-from agent.tools.memory import memory_save, memory_search, memory_list, memory_delete
+from agent.tools.memory import memory_save, memory_search, memory_list, memory_delete, memory_export, memory_import
 from agent.tools.code_quality import code_quality
 from agent.tools.dep_graph import dep_graph
 from agent.tools.context_build import context_build
@@ -104,6 +106,8 @@ _CORE_TOOLS = [
     terminal_exec, code_analyze, webfetch, web_search,
     lsp_definition, lsp_references, lsp_hover, lsp_symbols, lsp_diagnostics,
     lsp_go_to_definition, lsp_find_references,
+    lsp_workspace_symbols, lsp_go_to_implementation,
+    lsp_call_hierarchy_prepare, lsp_incoming_calls, lsp_outgoing_calls,
     handoff_to_coder, handoff_to_planner, reply_to_user,
     task_explore, task_explore_parallel, task_general, task_review,
     todo_read, todo_write, plan_enter, plan_exit, question,
@@ -111,7 +115,7 @@ _CORE_TOOLS = [
     git_add, git_commit, git_branch, git_stash,
     git_push, git_pull, git_fetch, git_merge,
     run_tests,
-    memory_save, memory_search, memory_list, memory_delete,
+    memory_save, memory_search, memory_list, memory_delete, memory_export, memory_import,
     code_quality, dep_graph, context_build,
     skill_invoke, skill_list, skill_create, hub_search, skill_install, skill_remove,
     github_list_issues, github_list_prs, github_get_pr,
@@ -147,10 +151,12 @@ PLANNER_TOOLS = [
     # LSP
     lsp_definition, lsp_references, lsp_hover, lsp_symbols, lsp_diagnostics,
     lsp_go_to_definition, lsp_find_references,
+    lsp_workspace_symbols, lsp_go_to_implementation,
+    lsp_call_hierarchy_prepare, lsp_incoming_calls, lsp_outgoing_calls,
     # Git (read-only)
     git_status, git_diff, git_log, git_show, git_blame,
     # Memory (cross-session knowledge)
-    memory_save, memory_search, memory_list, memory_delete,
+    memory_save, memory_search, memory_list, memory_delete, memory_export, memory_import,
     # Agent coordination
     handoff_to_coder, reply_to_user, task_explore, task_explore_parallel,
     todo_read, todo_write, plan_enter, plan_exit, question,

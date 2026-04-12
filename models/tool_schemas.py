@@ -272,6 +272,20 @@ class LSPFileArgs(BaseModel):
     )
 
 
+class LSPWorkspaceSymbolArgs(BaseModel):
+    """Arguments for workspace symbol search."""
+    query: str = Field(
+        description="Search query string to find symbols across the workspace."
+    )
+
+
+class LSPCallHierarchyItemArgs(BaseModel):
+    """Arguments for call hierarchy incoming/outgoing calls."""
+    item: str = Field(
+        description="JSON-serialized CallHierarchyItem from lsp_call_hierarchy_prepare."
+    )
+
+
 # ═══════════════════════════════════════════════════════════
 # Web
 # ═══════════════════════════════════════════════════════════
