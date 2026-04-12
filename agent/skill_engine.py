@@ -46,6 +46,7 @@ class SkillMeta:
     tools: dict = field(default_factory=dict)   # optional tool restrictions (future)
     version: str = ""
     source_file: str = ""    # absolute path to .md file
+    trusted: bool = False    # True = skill explicitly declares it uses shell commands
 
 
 @dataclass
@@ -135,32 +136,75 @@ def _coerce(v: str):
 
 # ── Body processing ──────────────────────────────────────────
 
-def _process_body(body: str, arguments: str = "", cwd: str = "") -> str:
+_SHELL_TIMEOUT = 10  # seconds — default timeout for skill shell commands
+
+
+def _process_body(
+    body: str,
+    arguments: str = "",
+    cwd: str = "",
+    skill_meta: "SkillMeta | None" = None,
+) -> str:
     """Apply !`cmd` injection and $ARGUMENTS substitution.
 
     Args:
-        body:      Raw markdown body.
-        arguments: User-provided text to replace $ARGUMENTS.
-        cwd:       Working directory for shell commands (default: WORKSPACE_DIR).
+        body:       Raw markdown body.
+        arguments:  User-provided text to replace $ARGUMENTS.
+        cwd:        Working directory for shell commands (default: WORKSPACE_DIR).
+        skill_meta: Metadata of the skill being processed (for trust checks).
     """
     # Resolve and clamp cwd to workspace (defense-in-depth)
     from agent.tools.utils import resolve_tool_path
     resolved_cwd = resolve_tool_path(cwd) if cwd else config.WORKSPACE_DIR
     work_dir = resolved_cwd
 
+    # Determine whether this skill is from the marketplace (not a local built-in)
+    is_marketplace_skill = (
+        skill_meta is not None
+        and skill_meta.source_file
+        and str(SKILLS_DIR) not in str(skill_meta.source_file)
+    )
+
     def _run_cmd(m: re.Match) -> str:
         cmd = m.group(1).strip()
+
+        # Security: marketplace skills must declare trusted: true in frontmatter
+        if is_marketplace_skill and not (skill_meta and skill_meta.trusted):
+            logger.warning(
+                "WARNING: Skill '%s' uses shell commands but is not trusted. "
+                "Shell execution blocked. Add 'trusted: true' to the skill frontmatter "
+                "after reviewing it at %s",
+                skill_meta.name if skill_meta else "unknown",
+                skill_meta.source_file if skill_meta else "unknown",
+            )
+            return f"```\n$ {cmd}\n(blocked: marketplace skill not trusted — add 'trusted: true' to frontmatter)\n```"
+
+        # Warn for marketplace skills even when trusted
+        if is_marketplace_skill and skill_meta and skill_meta.trusted:
+            logger.warning(
+                "WARNING: Executing shell command from marketplace skill '%s'. "
+                "Review skill at %s before trusting.",
+                skill_meta.name,
+                skill_meta.source_file,
+            )
+
         try:
-            # shell=True: commands come from trusted .md skill files, not user input.
-            # Sandboxed via work_dir (workspace-bound) and 30s timeout.
+            # Use explicit shell invocation instead of shell=True to avoid
+            # shell injection via crafted command strings.
+            if os.name == "nt":
+                # Windows: cmd.exe /c
+                shell_cmd = ["cmd.exe", "/c", cmd]
+            else:
+                shell_cmd = ["/bin/sh", "-c", cmd]
+
             r = subprocess.run(
-                cmd, shell=True, capture_output=True, timeout=30,
+                shell_cmd, shell=False, capture_output=True, timeout=_SHELL_TIMEOUT,
                 cwd=work_dir, encoding="utf-8", errors="replace",
             )
             output = (r.stdout or r.stderr or "(no output)").rstrip()
             return f"```\n$ {cmd}\n{output}\n```"
         except subprocess.TimeoutExpired:
-            return f"```\n$ {cmd}\n(timed out after 30s)\n```"
+            return f"```\n$ {cmd}\n(timed out after {_SHELL_TIMEOUT}s)\n```"
         except Exception as e:
             return f"```\n$ {cmd}\n(error: {e})\n```"
 
@@ -207,6 +251,7 @@ def discover_skills() -> list[Skill]:
                     tools=meta_dict.get("tools", {}) or {},
                     version=str(meta_dict.get("version", "")),
                     source_file=str(path),
+                    trusted=bool(meta_dict.get("trusted", False)),
                 )
                 skills.append(Skill(meta=meta, raw_body=body))
                 seen.add(name)
@@ -263,9 +308,10 @@ def invoke_skill(
             tools=meta_dict.get("tools", {}) or {},
             version=str(meta_dict.get("version", "")),
             source_file=str(path),
+            trusted=bool(meta_dict.get("trusted", False)),
         )
 
-        content = _process_body(raw_body, arguments=arguments, cwd=cwd)
+        content = _process_body(raw_body, arguments=arguments, cwd=cwd, skill_meta=meta)
         return content, meta
 
     except Exception as e:

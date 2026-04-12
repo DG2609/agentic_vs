@@ -152,9 +152,14 @@ def get_snapshot(snap_id: str) -> dict | None:
 
 
 def revert_snapshot(snap_id: str) -> list[str]:
-    """Restore files from a snapshot.
+    """Restore files from a snapshot (transactional — all-or-nothing).
+
+    Before reverting, current versions are backed up to a temp directory.
+    If any revert fails, all files are restored from the temp backup.
 
     Returns list of restored file paths.
+    Raises ValueError if snapshot not found.
+    Raises RuntimeError if revert fails (files are rolled back automatically).
     """
     snap_dir = SNAPSHOT_DIR / snap_id
     meta_path = snap_dir / "metadata.json"
@@ -164,28 +169,69 @@ def revert_snapshot(snap_id: str) -> list[str]:
     meta = json.loads(meta_path.read_text())
     workspace = meta.get("workspace", str(config.WORKSPACE_DIR))
     files_dir = snap_dir / "files"
-    restored = []
+    records = meta.get("files", [])
 
-    for record in meta.get("files", []):
-        rel_path = record["path"]
-        existed = record.get("existed", False)
-        target = os.path.join(workspace, rel_path)
+    # Step 1: Back up current file versions to a temp dir
+    import tempfile
+    tmp_backup = Path(tempfile.mkdtemp(prefix="shadowdev_revert_"))
+    current_backups: list[tuple[str, Path | None]] = []  # (target_path, backup_path | None)
 
-        if not existed:
-            # File didn't exist before — remove it if it was created
-            if os.path.exists(target):
-                os.remove(target)
-                restored.append(f"REMOVED {rel_path}")
-            continue
+    try:
+        for record in records:
+            rel_path = record["path"]
+            existed = record.get("existed", False)
+            target = os.path.join(workspace, rel_path)
+            # Only back up files that existed in the original snapshot — files that
+            # didn't exist (existed=False) will be removed; no backup copy needed.
+            if existed and os.path.exists(target):
+                bak = tmp_backup / rel_path
+                bak.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, bak)
+                current_backups.append((target, bak))
+            else:
+                current_backups.append((target, None))
 
-        source = files_dir / rel_path
-        if not source.exists():
-            logger.warning("[snapshots] Backup file missing: %s", source)
-            continue
+        # Step 2: Apply all reverts
+        restored = []
+        for record in records:
+            rel_path = record["path"]
+            existed = record.get("existed", False)
+            target = os.path.join(workspace, rel_path)
 
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        shutil.copy2(str(source), target)
-        restored.append(rel_path)
+            if not existed:
+                # File didn't exist before — remove it if it was created
+                if os.path.exists(target):
+                    os.remove(target)
+                    restored.append(f"REMOVED {rel_path}")
+                continue
+
+            source = files_dir / rel_path
+            if not source.exists():
+                logger.warning("[snapshots] Backup file missing: %s", source)
+                continue
+
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(str(source), target)
+            restored.append(rel_path)
+
+    except Exception as exc:
+        # Step 3: Rollback — restore from temp backup
+        logger.error("[snapshots] Revert failed (%s) — rolling back", exc)
+        for target_path, bak in current_backups:
+            try:
+                if bak is not None and bak.exists():
+                    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                    shutil.copy2(str(bak), target_path)
+                elif bak is None and os.path.exists(target_path):
+                    # File was created during revert but shouldn't exist — remove it
+                    os.remove(target_path)
+            except Exception as rb_exc:
+                logger.error("[snapshots] Rollback failed for %s: %s", target_path, rb_exc)
+        raise RuntimeError(f"Revert failed and was rolled back: {exc}") from exc
+
+    finally:
+        # Step 4: Clean up temp backup
+        shutil.rmtree(tmp_backup, ignore_errors=True)
 
     logger.info("[snapshots] Reverted snapshot %s (%d files)", snap_id, len(restored))
     return restored
