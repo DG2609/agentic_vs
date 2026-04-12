@@ -4,10 +4,15 @@ import uuid
 import asyncio
 import re
 import time
+import json
+import logging
+import datetime
+from pathlib import Path
 
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.live import Live
+from rich.panel import Panel
 from rich.status import Status
 from rich.syntax import Syntax
 from rich.text import Text
@@ -21,9 +26,106 @@ from langchain_core.messages import HumanMessage
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from agent.graph import build_graph
+from agent.graph import build_graph, ALL_TOOLS
 from agent.hooks import run_lifecycle_hook, LIFECYCLE_HOOKS
 from langgraph.checkpoint.memory import MemorySaver
+
+
+# ── Structured JSON log handler ─────────────────────────────
+class JSONLineHandler(logging.Handler):
+    def __init__(self, filepath):
+        super().__init__()
+        self.filepath = filepath
+
+    def emit(self, record):
+        try:
+            log_entry = {
+                "ts": record.created,
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+            }
+            if record.exc_info:
+                log_entry["exc"] = self.formatException(record.exc_info)
+            with open(self.filepath, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception:
+            pass
+
+
+def _setup_json_logging(thread_id: str) -> None:
+    """Wire up per-session JSON line log file and prune logs older than 7 days."""
+    log_dir = Path.home() / ".shadowdev" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 7-day retention: delete stale .jsonl files
+    cutoff = time.time() - 7 * 24 * 3600
+    for old_log in log_dir.glob("session-*.jsonl"):
+        try:
+            if old_log.stat().st_mtime < cutoff:
+                old_log.unlink()
+        except Exception:
+            pass
+
+    json_handler = JSONLineHandler(log_dir / f"session-{thread_id}.jsonl")
+    json_handler.setLevel(logging.DEBUG)
+    logging.getLogger().addHandler(json_handler)
+
+
+# ── First-run onboarding ─────────────────────────────────────
+_SHADOWDEV_DIR = Path.home() / ".shadowdev"
+_INITIALIZED_FLAG = _SHADOWDEV_DIR / ".initialized"
+
+_SHADOWDEV_VERSION = "0.4.0"  # keep in sync with pyproject.toml
+
+
+def _get_active_model() -> tuple[str, str]:
+    """Return (model, provider) strings based on current config."""
+    provider = config.LLM_PROVIDER
+    model_map = {
+        "ollama": config.OLLAMA_MODEL,
+        "openai": config.OPENAI_MODEL,
+        "anthropic": config.ANTHROPIC_MODEL,
+        "google": config.GOOGLE_MODEL,
+        "groq": config.GROQ_MODEL,
+        "azure": config.AZURE_OPENAI_MODEL,
+    }
+    return model_map.get(provider, "unknown"), provider
+
+
+def _show_first_run_welcome(console: Console) -> None:
+    """Print a rich welcome panel on first run, then create the initialized flag."""
+    model, provider = _get_active_model()
+    tool_count = len(ALL_TOOLS)
+    env_path = Path(os.path.dirname(os.path.abspath(__file__))) / ".env"
+
+    welcome_lines = [
+        f"[bold yellow]ShadowDev v{_SHADOWDEV_VERSION}[/bold yellow] — AI-Powered Coding Assistant\n",
+        f"  [bold cyan]Model[/bold cyan]       [dim]│[/dim] [bold green]{model}[/bold green]  [dim]({provider})[/dim]",
+        f"  [bold cyan]Provider[/bold cyan]    [dim]│[/dim] [bold]{provider.upper()}[/bold]",
+        f"  [bold cyan]Tools[/bold cyan]       [dim]│[/dim] [bold]{tool_count}[/bold] tools loaded\n",
+        "[bold white]Key shortcuts[/bold white]",
+        "  [bold]/plan[/bold]   — enter planner agent mode",
+        "  [bold]/code[/bold]   — enter coder agent mode",
+        "  [bold]/fork[/bold]   — fork session at current point",
+        "  [bold]Ctrl+C[/bold]  — cancel current request",
+        "  [bold]/help[/bold]   — show all commands\n",
+        f"  [dim]Config:[/dim] [italic]{env_path}[/italic]",
+    ]
+
+    panel = Panel(
+        "\n".join(welcome_lines),
+        title="[bold magenta]Welcome to ShadowDev[/bold magenta]",
+        border_style="magenta",
+        padding=(1, 2),
+    )
+    console.print()
+    console.print(panel)
+    console.print()
+
+    # Mark initialized
+    _SHADOWDEV_DIR.mkdir(parents=True, exist_ok=True)
+    _INITIALIZED_FLAG.touch()
 
 # Compile graph with in-memory persistence
 graph = build_graph(checkpointer=MemorySaver())
@@ -102,7 +204,7 @@ def _fmt_elapsed(seconds: float) -> str:
 def bottom_toolbar():
     mode = current_agent_mode.upper()
     color = MODE_COLORS.get(current_agent_mode, "white")
-    model = config.OLLAMA_MODEL if config.LLM_PROVIDER == "ollama" else config.OPENAI_MODEL
+    model, _provider = _get_active_model()
     return HTML(
         f' <b>ShadowDev</b>'
         f' │ <style bg="ansiyellow" fg="black"> Alt+1 Plan </style>'
@@ -141,28 +243,31 @@ async def chat_loop():
     session = PromptSession(style=style, bottom_toolbar=bottom_toolbar, key_bindings=bindings)
     thread_id = str(uuid.uuid4())
 
+    # ── JSON structured logging ──────────────────────────────
+    _setup_json_logging(thread_id)
+
     # ── Lifecycle: session_start ─────────────────────────────
     if LIFECYCLE_HOOKS:
         await run_lifecycle_hook("session_start", {"thread_id": thread_id})
 
-    # ── Styled Banner ───────────────────────────────────────
-    model = config.OLLAMA_MODEL if config.LLM_PROVIDER == "ollama" else config.OPENAI_MODEL
-    provider = config.LLM_PROVIDER.upper()
+    # ── First-run welcome panel ──────────────────────────────
+    if not _INITIALIZED_FLAG.exists():
+        _show_first_run_welcome(console)
+
+    # ── Concise session banner (every run) ───────────────────
+    model, provider = _get_active_model()
+    tool_count = len(ALL_TOOLS)
     workspace = os.path.basename(os.path.abspath(config.WORKSPACE_DIR))
-    
+
     console.print()
-    console.print("[bold magenta]  ╭──────────────────────────────────────╮[/bold magenta]")
-    console.print("[bold magenta]  │[/bold magenta]     [bold white]⚡ ShadowDev CLI v2.0 ⚡[/bold white]         [bold magenta]│[/bold magenta]")
-    console.print("[bold magenta]  │[/bold magenta]     [dim]AI-Powered Coding Assistant[/dim]      [bold magenta]│[/bold magenta]")
-    console.print("[bold magenta]  ╰──────────────────────────────────────╯[/bold magenta]")
-    console.print()
-    console.print(f"  [bold cyan]◆[/bold cyan] Provider   [dim]│[/dim] [bold]{provider}[/bold]")
-    console.print(f"  [bold cyan]◆[/bold cyan] Model      [dim]│[/dim] [bold green]{model}[/bold green]")
-    console.print(f"  [bold cyan]◆[/bold cyan] Workspace  [dim]│[/dim] [bold]{workspace}/[/bold]")
-    console.print(f"  [bold cyan]◆[/bold cyan] Session    [dim]│[/dim] [dim]{thread_id[:8]}…[/dim]")
-    console.print()
-    console.print("  [dim]Shortcuts: [bold]Alt+1[/bold] Plan │ [bold]Alt+2[/bold] Code │ [bold]Alt+3[/bold] Doc │ [bold]/plan /code /doc /fork [N] /exit[/bold][/dim]")
-    console.print(f"  [dim]{'─' * 50}[/dim]")
+    console.print(
+        f"  [bold magenta]ShadowDev[/bold magenta]"
+        f"  [dim]│[/dim]  [bold green]{model}[/bold green]  [dim]({provider})[/dim]"
+        f"  [dim]│[/dim]  [bold]{tool_count}[/bold] tools"
+        f"  [dim]│[/dim]  [dim]/help for commands[/dim]"
+    )
+    console.print(f"  [dim]Workspace: {workspace}/  │  Session: {thread_id[:8]}…[/dim]")
+    console.print(f"  [dim]{'─' * 60}[/dim]")
     console.print()
 
     while True:

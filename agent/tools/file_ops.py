@@ -13,6 +13,7 @@ import os
 import glob
 import difflib
 import pathlib
+from pathlib import Path
 from langchain_core.tools import tool
 import config
 from agent.tools.truncation import truncate_output
@@ -21,6 +22,37 @@ from models.tool_schemas import (
     FileReadArgs, FileWriteArgs, FileEditArgs, FileListArgs, GlobSearchArgs,
     FileEditBatchArgs, ApplyPatchInput,
 )
+
+
+# ── Diff syntax highlighting ─────────────────────────────────
+
+def _render_diff(diff_text: str, file_path: str) -> str:
+    """Render unified diff with syntax highlighting via Rich.
+
+    Returns an ANSI-coloured string suitable for terminal output.
+    Falls back to the raw diff text if Rich is unavailable or
+    the terminal does not support colour.
+    """
+    try:
+        from rich.syntax import Syntax
+        from rich.console import Console
+
+        ext = Path(file_path).suffix.lstrip(".")
+        lang_map = {
+            "py": "python", "ts": "typescript", "js": "javascript",
+            "rs": "rust", "go": "go", "java": "java", "cpp": "cpp",
+            "c": "c", "md": "markdown", "json": "json", "yaml": "yaml",
+            "yml": "yaml", "toml": "toml", "sh": "bash", "html": "html",
+            "css": "css",
+        }
+        lang = lang_map.get(ext, "diff")
+
+        _console = Console(force_terminal=True, width=120)
+        with _console.capture() as capture:
+            _console.print(Syntax(diff_text, "diff", theme="monokai", line_numbers=False))
+        return capture.get()
+    except Exception:
+        return diff_text
 
 # Pending diffs for frontend diff view (file_path → {original, modified})
 # server/main.py reads and clears this after emitting file:diff events
@@ -384,10 +416,11 @@ def _write_edit(resolved: str, file_path: str, old_content: str, new_content: st
     diff_preview = ""
     if diff:
         diff_lines = diff[:30]  # limit diff output
-        diff_preview = "\n\nDiff:\n```\n" + "\n".join(diff_lines)
+        raw_diff = "\n".join(diff_lines)
         if len(diff) > 30:
-            diff_preview += f"\n... ({len(diff) - 30} more diff lines)"
-        diff_preview += "\n```"
+            raw_diff += f"\n... ({len(diff) - 30} more diff lines)"
+        highlighted = _render_diff(raw_diff, file_path)
+        diff_preview = f"\n\nDiff:\n{highlighted}"
 
     return f"✅ Edited {file_path} (strategy: {strategy}){diff_preview}"
 
