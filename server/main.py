@@ -9,6 +9,7 @@ import uuid
 import asyncio
 import logging
 import subprocess
+from uuid import uuid4
 
 import socketio
 import aiohttp_cors
@@ -340,6 +341,140 @@ async def search_files(request: web.Request):
             except (OSError, UnicodeDecodeError):
                 continue
     return web.json_response({"results": results})
+
+
+@routes.get('/health')
+async def health(request: web.Request):
+    """Health check endpoint — returns server status, tool count and current model."""
+    provider = config.LLM_PROVIDER
+    if provider == "ollama":
+        model = config.OLLAMA_MODEL
+    elif provider == "openai":
+        model = config.OPENAI_MODEL
+    elif provider == "anthropic":
+        model = getattr(config, "ANTHROPIC_MODEL", "unknown")
+    elif provider == "google":
+        model = getattr(config, "GOOGLE_MODEL", "unknown")
+    elif provider == "groq":
+        model = getattr(config, "GROQ_MODEL", "unknown")
+    elif provider == "azure":
+        model = getattr(config, "AZURE_OPENAI_MODEL", "unknown")
+    else:
+        model = "unknown"
+
+    try:
+        from agent.graph import ALL_TOOLS
+        tool_count = len(ALL_TOOLS)
+    except Exception:
+        tool_count = 0
+
+    return web.json_response({"status": "ok", "tools": tool_count, "model": model})
+
+
+@routes.post('/stream')
+async def stream_endpoint(request: web.Request):
+    """SSE streaming endpoint — runs the agent and streams token/tool events."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.Response(status=400, text="Invalid JSON body")
+
+    prompt = body.get("prompt", "").strip()
+    if not prompt:
+        return web.Response(status=400, text="'prompt' is required")
+
+    thread_id = body.get("thread_id") or str(uuid4())
+    workspace = body.get("workspace") or config.WORKSPACE_DIR
+
+    if not graph:
+        resp = web.StreamResponse(status=503)
+        resp.content_type = "text/event-stream"
+        await resp.prepare(request)
+        err = json.dumps({"type": "error", "message": "Agent not initialized"})
+        await resp.write(f"data: {err}\n\n".encode())
+        await resp.write_eof()
+        return resp
+
+    resp = web.StreamResponse(status=200)
+    resp.content_type = "text/event-stream"
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    await resp.prepare(request)
+
+    graph_config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": 100,
+    }
+    input_state = {
+        "messages": [HumanMessage(content=prompt)],
+        "workspace": workspace,
+    }
+
+    try:
+        async for event in graph.astream_events(input_state, config=graph_config, version="v2"):
+            kind = event.get("event", "")
+
+            if kind == "on_chat_model_stream":
+                chunk = event.get("data", {}).get("chunk")
+                if chunk:
+                    content = getattr(chunk, "content", None)
+                    if isinstance(content, str) and content:
+                        payload = json.dumps({"type": "token", "content": content})
+                        await resp.write(f"data: {payload}\n\n".encode())
+                    elif isinstance(content, list):
+                        for block in content:
+                            text = ""
+                            if isinstance(block, str):
+                                text = block
+                            elif isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "")
+                            if text:
+                                payload = json.dumps({"type": "token", "content": text})
+                                await resp.write(f"data: {payload}\n\n".encode())
+
+            elif kind == "on_tool_start":
+                tool_name = event.get("name", "unknown")
+                tool_args = event.get("data", {}).get("input", {})
+                payload = json.dumps({"type": "tool_start", "name": tool_name, "args": tool_args})
+                await resp.write(f"data: {payload}\n\n".encode())
+
+            elif kind == "on_tool_end":
+                tool_name = event.get("name", "unknown")
+                output = event.get("data", {}).get("output", "")
+                result_str = str(output.content) if hasattr(output, "content") else str(output)
+                display = result_str[:2000] + (f"\n...({len(result_str)} chars)" if len(result_str) > 2000 else "")
+                payload = json.dumps({"type": "tool_end", "name": tool_name, "result": display})
+                await resp.write(f"data: {payload}\n\n".encode())
+
+        done_payload = json.dumps({"type": "done", "thread_id": thread_id})
+        await resp.write(f"data: {done_payload}\n\n".encode())
+
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.error(f"Stream error: {e}", exc_info=True)
+        err_payload = json.dumps({"type": "error", "message": str(e)})
+        try:
+            await resp.write(f"data: {err_payload}\n\n".encode())
+        except Exception:
+            pass
+
+    await resp.write_eof()
+    return resp
+
+
+@routes.options('/stream')
+async def stream_preflight(request: web.Request):
+    """CORS preflight for /stream."""
+    return web.Response(
+        status=204,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, x-api-key",
+        },
+    )
 
 
 @routes.get('/api/git/status')
