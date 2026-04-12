@@ -3,10 +3,15 @@ Tool: code_search — search for patterns across files with context.
 Supports ripgrep (fast, native) with fallback to Python regex.
 All outputs go through universal truncation.
 """
+import errno
+import logging
 import os
+import platform
 import re
+import signal
 import subprocess
 import shutil
+import time
 from fnmatch import fnmatch
 from langchain_core.tools import tool
 import config
@@ -17,6 +22,32 @@ from models.tool_schemas import CodeSearchArgs, GrepSearchArgs, BatchReadArgs
 # Check for ripgrep availability
 _RG_PATH = shutil.which(getattr(config, "RIPGREP_PATH", "rg"))
 
+_logger = logging.getLogger(__name__)
+
+# Detect WSL (Windows Subsystem for Linux) — slower filesystem needs longer timeout
+_IS_WSL = "microsoft" in platform.uname().release.lower()
+
+# Env var override for grep timeout
+_BASE_TIMEOUT = int(os.getenv("SHADOWDEV_GREP_TIMEOUT_S", str(60 if _IS_WSL else int(config.TOOL_TIMEOUT))))
+
+_RG_BUFFER = 20_000_000  # 20 MB buffer for large codebases
+
+
+def _kill_process_gracefully(proc: subprocess.Popen, timeout_s: float = 5.0) -> None:
+    """Send SIGTERM, wait timeout_s, then SIGKILL to prevent zombie processes."""
+    try:
+        if os.name == "nt":
+            proc.terminate()
+        else:
+            proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    except (ProcessLookupError, OSError):
+        pass
+
 
 def _ripgrep_search(
     query: str,
@@ -26,60 +57,73 @@ def _ripgrep_search(
     context_lines: int = 0,
     case_sensitive: bool = False,
 ) -> str | None:
-    """Try ripgrep-based search. Returns None if rg not available."""
+    """Try ripgrep-based search using Popen for robustness. Returns None if rg not available."""
     if not _RG_PATH:
         return None
 
-    cmd = [
-        _RG_PATH,
-        "--line-number",
-        "--no-heading",
-        "--color=never",
-        f"--max-count={max(10, max_results)}",  # per-file cap, respects caller's limit
-        f"--max-columns=2000",
-        "--max-columns-preview",
-        "--sort=modified",  # most recently modified first (like OpenCode)
-    ]
+    def _build_cmd(single_threaded: bool = False) -> list:
+        cmd = [
+            _RG_PATH,
+            "--line-number",
+            "--no-heading",
+            "--color=never",
+            f"--max-count={max(10, max_results)}",
+            "--max-columns=2000",
+            "--max-columns-preview",
+            "--sort=modified",
+        ]
+        if single_threaded:
+            cmd.extend(["-j", "1"])
+        if not case_sensitive:
+            cmd.append("--ignore-case")
+        if context_lines > 0:
+            cmd.append(f"--context={context_lines}")
+        if file_pattern and file_pattern != "*":
+            cmd.extend(["--glob", file_pattern])
+        cmd.extend([query, search_dir])
+        return cmd
 
-    if not case_sensitive:
-        cmd.append("--ignore-case")
-
-    if context_lines > 0:
-        cmd.append(f"--context={context_lines}")
-
-    if file_pattern and file_pattern != "*":
-        cmd.extend(["--glob", file_pattern])
-
-    cmd.extend([query, search_dir])
-
-    # Two attempts: normal timeout, then 2x timeout on first failure
-    for _attempt in range(2):
-        timeout = config.TOOL_TIMEOUT * (1 + _attempt)
+    def _run_rg(single_threaded: bool = False) -> str | None:
+        cmd = _build_cmd(single_threaded)
+        timeout = _BASE_TIMEOUT
+        proc = None
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                encoding="utf-8",
-                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=_RG_BUFFER,
             )
-            break
-        except subprocess.TimeoutExpired:
-            if _attempt == 0:
-                import logging as _log
-                _log.getLogger(__name__).warning(
-                    f"[code_search] ripgrep timed out after {timeout}s — retrying with {timeout * 2}s"
-                )
-                continue
-            return None  # Both attempts timed out → fall back to Python
-        except (FileNotFoundError, OSError):
+            try:
+                stdout_bytes, _ = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_process_gracefully(proc)
+                _logger.warning("[code_search] ripgrep timed out after %ds", timeout)
+                return None
+            stdout = stdout_bytes.decode("utf-8", errors="replace")
+        except OSError as exc:
+            if exc.errno == errno.EAGAIN:
+                return "EAGAIN"  # sentinel: retry with single-threaded
+            return None
+        finally:
+            if proc and proc.poll() is None:
+                _kill_process_gracefully(proc)
+
+        if proc.returncode > 1:
+            return None
+        return stdout
+
+    # First attempt (multi-threaded)
+    output = _run_rg(single_threaded=False)
+    if output == "EAGAIN":
+        _logger.warning("[code_search] EAGAIN from ripgrep — retrying with -j 1")
+        output = _run_rg(single_threaded=True)
+        if output == "EAGAIN":
             return None
 
-    if result.returncode > 1:  # 0 = matches, 1 = no matches, 2+ = error
+    if output is None:
         return None
 
-    output = result.stdout
     if not output.strip():
         return f"No matches found for '{query}' in {search_dir}"
 
@@ -89,11 +133,10 @@ def _ripgrep_search(
     match_count = 0
     for line in lines:
         if line.strip():
-            # Replace absolute path with relative
             if line.startswith(search_dir):
                 line = line[len(search_dir):].lstrip(os.sep)
             formatted.append(line)
-            if not line.startswith("--"):  # separator lines
+            if not line.startswith("--"):
                 match_count += 1
         else:
             formatted.append(line)
@@ -102,7 +145,7 @@ def _ripgrep_search(
             formatted.append(f"\n... (showing first {max_results} matches)")
             break
 
-    header = f"🔍 Search results for '{query}' (ripgrep):\n\n"
+    header = f"Search results for '{query}' (ripgrep):\n\n"
     return header + "\n".join(formatted)
 
 

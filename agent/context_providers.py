@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from typing import Optional
 
 import config
@@ -26,6 +27,10 @@ logger = logging.getLogger(__name__)
 _FILE_PATTERN = re.compile(r"@file:([^\s]+)")
 _DIFF_PATTERN = re.compile(r"@diff(?::([^\s]+))?")
 _CODEBASE_PATTERN = re.compile(r"@codebase:([^\s]+)")
+
+# TTL cache for @codebase: queries (60s default)
+_CODEBASE_CACHE: dict[str, tuple[float, str]] = {}  # key → (timestamp, result)
+_CACHE_TTL = 60.0  # seconds
 
 
 def _read_file(path: str, workspace: str) -> str:
@@ -128,6 +133,20 @@ def _git_diff(ref: Optional[str], workspace: str) -> str:
         return "[git not found]"
 
 
+def _cached_codebase_search(workspace: str, query: str) -> str:
+    """Cached wrapper for _run_codebase_search. Caches results for _CACHE_TTL seconds."""
+    cache_key = f"{workspace}:{query}"
+    now = time.time()
+    if cache_key in _CODEBASE_CACHE:
+        ts, result = _CODEBASE_CACHE[cache_key]
+        if now - ts < _CACHE_TTL:
+            logger.debug("[context_providers] @codebase cache hit: %s", query)
+            return result
+    result = _codebase_search(query, workspace)
+    _CODEBASE_CACHE[cache_key] = (now, result)
+    return result
+
+
 def _codebase_search(query: str, workspace: str) -> str:
     """Search codebase using ripgrep."""
     rg_path = getattr(config, "RIPGREP_PATH", "rg")
@@ -179,10 +198,10 @@ def expand_context_mentions(prompt: str, workspace: str = "") -> str:
         content = _git_diff(ref, workspace)
         expansions.append(content)
 
-    # @codebase:query
+    # @codebase:query (with TTL cache)
     for match in _CODEBASE_PATTERN.finditer(prompt):
         query = match.group(1)
-        content = _codebase_search(query, workspace)
+        content = _cached_codebase_search(workspace, query)
         expansions.append(content)
 
     if not expansions:
