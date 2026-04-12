@@ -1090,3 +1090,31 @@ class SkillRemoveArgs(BaseModel):
     name: str = Field(
         description="Name of the skill to remove (markdown or plugin).",
     )
+
+
+# ═══════════════════════════════════════════════════════════
+# Apply Patch (unified diff)
+# ═══════════════════════════════════════════════════════════
+
+class ApplyPatchInput(BaseModel):
+    """Arguments for applying a unified diff patch to one or more files."""
+    patch: str = Field(
+        description=(
+            "Unified diff text in standard format (--- a/file ... +++ b/file ... @@ ... @@). "
+            "May contain multiple file blocks. Produced by 'git diff', 'diff -u', etc."
+        )
+    )
+    workspace: str = Field(
+        default="",
+        description=(
+            "Optional root directory for resolving relative paths in the patch. "
+            "Empty = current workspace root."
+        )
+    )
+
+    @field_validator("patch")
+    @classmethod
+    def patch_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError("patch cannot be empty")
+        return v

@@ -12,13 +12,14 @@ All outputs go through truncation layer.
 import os
 import glob
 import difflib
+import pathlib
 from langchain_core.tools import tool
 import config
 from agent.tools.truncation import truncate_output
-from agent.tools.utils import resolve_tool_path
+from agent.tools.utils import resolve_tool_path, resolve_path_safe
 from models.tool_schemas import (
     FileReadArgs, FileWriteArgs, FileEditArgs, FileListArgs, GlobSearchArgs,
-    FileEditBatchArgs,
+    FileEditBatchArgs, ApplyPatchInput,
 )
 
 # Pending diffs for frontend diff view (file_path → {original, modified})
@@ -31,6 +32,32 @@ _BLOCKED_DEVICE_PATHS = frozenset({
     "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom",
     "/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr",
 })
+
+# Bare git repo defense: block writes to .git internals that can enable RCE
+# via git hooks (pre-commit, post-checkout) or core.fsmonitor in git config.
+_GIT_BLOCKED = {"HEAD", "config", "COMMIT_EDITMSG", "FETCH_HEAD", "ORIG_HEAD", "MERGE_HEAD"}
+_GIT_BLOCKED_DIRS = {"objects", "refs", "hooks", "logs"}
+
+_GIT_WRITE_BLOCKED_MSG = (
+    "⛔ Write blocked: modifying .git internals can enable RCE via git hooks or "
+    "core.fsmonitor. Use git commands instead."
+)
+
+
+def _is_git_internal_write(resolved_path: str) -> bool:
+    """Return True if path targets a .git internal that could enable RCE via git hooks/fsmonitor."""
+    parts = pathlib.Path(resolved_path).parts
+    for i, part in enumerate(parts):
+        if part == ".git":
+            rest = parts[i + 1:]
+            if not rest:
+                return False  # writing to .git dir itself is fine
+            if rest[0] in _GIT_BLOCKED_DIRS:
+                return True
+            if rest[0] in _GIT_BLOCKED and len(rest) == 1:
+                return True
+    return False
+
 
 
 @tool(args_schema=FileReadArgs)
@@ -105,6 +132,10 @@ def file_write(file_path: str, content: str, create_dirs: bool = True) -> str:
         Success or error message.
     """
     resolved = _resolve_path(file_path)
+
+    # Bare git repo defense
+    if _is_git_internal_write(resolved):
+        return _GIT_WRITE_BLOCKED_MSG
 
     try:
         if create_dirs:
@@ -270,52 +301,71 @@ def file_edit(file_path: str, old_string: str, new_string: str) -> str:
     if not os.path.isfile(resolved):
         return f"Error: File '{file_path}' not found."
 
+    # Bare git repo defense
+    if _is_git_internal_write(resolved):
+        return _GIT_WRITE_BLOCKED_MSG
+
     try:
-        with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
+        # newline="" preserves raw line endings (no OS-level \r\n→\n conversion)
+        # so we can accurately detect and later restore the original line ending style.
+        with open(resolved, "r", encoding="utf-8", errors="ignore", newline="") as f:
             content = f.read()
     except Exception as e:
         return f"Error reading file: {e}"
 
-    # Strategy 1: Exact match
-    count = content.count(old_string)
+    # ── Line-ending awareness ────────────────────────────────
+    # Detect dominant line ending; normalise to LF for matching; restore on write.
+    original_le = "\r\n" if "\r\n" in content else "\n"
+    content_lf = content.replace("\r\n", "\n")
+    old_string_lf = old_string.replace("\r\n", "\n")
+    new_string_lf = new_string.replace("\r\n", "\n")
+
+    # Strategy 1: Exact match (on LF-normalised content)
+    count = content_lf.count(old_string_lf)
     if count == 1:
-        new_content = content.replace(old_string, new_string, 1)
+        result_lf = content_lf.replace(old_string_lf, new_string_lf, 1)
+        new_content = result_lf.replace("\n", original_le)
         return _write_edit(resolved, file_path, content, new_content, "exact_match")
     elif count > 1:
         return f"❌ Error: 'old_string' found {count} times. Please provide more specific context."
 
     # Strategy 2: Line-trimmed match
-    matched_text, info = _line_trimmed_match(content, old_string)
+    matched_text, info = _line_trimmed_match(content_lf, old_string_lf)
     if matched_text is not None:
-        if content.count(matched_text) == 1:
-            adjusted_new = _adjust_indentation(old_string, matched_text, new_string)
-            new_content = content.replace(matched_text, adjusted_new, 1)
+        if content_lf.count(matched_text) == 1:
+            adjusted_new = _adjust_indentation(old_string_lf, matched_text, new_string_lf)
+            result_lf = content_lf.replace(matched_text, adjusted_new, 1)
+            new_content = result_lf.replace("\n", original_le)
             return _write_edit(resolved, file_path, content, new_content, f"fuzzy:{info}")
 
     # Strategy 3: Levenshtein fuzzy match
-    matched_text, info = _levenshtein_match(content, old_string)
+    matched_text, info = _levenshtein_match(content_lf, old_string_lf)
     if matched_text is not None:
-        if content.count(matched_text) == 1:
-            adjusted_new = _adjust_indentation(old_string, matched_text, new_string)
-            new_content = content.replace(matched_text, adjusted_new, 1)
+        if content_lf.count(matched_text) == 1:
+            adjusted_new = _adjust_indentation(old_string_lf, matched_text, new_string_lf)
+            result_lf = content_lf.replace(matched_text, adjusted_new, 1)
+            new_content = result_lf.replace("\n", original_le)
             return _write_edit(resolved, file_path, content, new_content, f"fuzzy:{info}")
 
     # Strategy 4: Block anchor match
-    matched_text, info = _block_anchor_match(content, old_string)
+    matched_text, info = _block_anchor_match(content_lf, old_string_lf)
     if matched_text is not None:
-        if content.count(matched_text) == 1:
-            adjusted_new = _adjust_indentation(old_string, matched_text, new_string)
-            new_content = content.replace(matched_text, adjusted_new, 1)
+        if content_lf.count(matched_text) == 1:
+            adjusted_new = _adjust_indentation(old_string_lf, matched_text, new_string_lf)
+            result_lf = content_lf.replace(matched_text, adjusted_new, 1)
+            new_content = result_lf.replace("\n", original_le)
             return _write_edit(resolved, file_path, content, new_content, f"fuzzy:{info}")
 
     # All strategies failed — provide helpful error with closest match
-    return _edit_failed_hint(content, old_string, file_path)
+    return _edit_failed_hint(content_lf, old_string_lf, file_path)
 
 
 def _write_edit(resolved: str, file_path: str, old_content: str, new_content: str, strategy: str) -> str:
     """Write the edited content and return result with diff preview."""
     try:
-        with open(resolved, "w", encoding="utf-8") as f:
+        # Use newline="" to suppress OS-level \n→\r\n translation on Windows;
+        # line endings are already restored to original (CRLF or LF) before this call.
+        with open(resolved, "w", encoding="utf-8", newline="") as f:
             f.write(new_content)
     except Exception as e:
         return f"Error writing file: {e}"
@@ -409,6 +459,10 @@ def file_edit_batch(edits: list) -> str:
         resolved = _resolve_path(file_path)
         if not os.path.isfile(resolved):
             return f"❌ Batch aborted at edit #{idx + 1}: File '{file_path}' not found. No files changed."
+
+        # Bare git repo defense
+        if _is_git_internal_write(resolved):
+            return f"❌ Batch aborted at edit #{idx + 1}: {_GIT_WRITE_BLOCKED_MSG}"
 
         try:
             with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
@@ -641,3 +695,264 @@ def _fmt_size(b: int) -> str:
 
 def _resolve_path(p: str) -> str:
     return resolve_tool_path(p)
+
+
+# ─────────────────────────────────────────────────────────────
+# apply_patch — unified diff application
+# ─────────────────────────────────────────────────────────────
+
+def _parse_unified_diff(patch: str) -> list[dict]:
+    """Parse a unified diff string into a list of file-level records.
+
+    Each record has keys:
+        old_path  – path from '--- ' line (None for new-file creation)
+        new_path  – path from '+++ ' line (None for file deletion)
+        hunks     – list of hunk dicts: {old_start, old_count, new_start, new_count, lines}
+    """
+    records: list[dict] = []
+    current: dict | None = None
+    current_hunk: dict | None = None
+
+    def _strip_ab(path: str) -> str:
+        """Strip leading 'a/' or 'b/' prefix that git diff adds."""
+        if path.startswith("a/") or path.startswith("b/"):
+            return path[2:]
+        return path
+
+    for raw_line in patch.splitlines():
+        if raw_line.startswith("--- "):
+            # Start of a new file block — save previous
+            if current is not None:
+                if current_hunk is not None:
+                    current["hunks"].append(current_hunk)
+                    current_hunk = None
+                records.append(current)
+            path = raw_line[4:].split("\t")[0].strip()
+            current = {
+                "old_path": None if path == "/dev/null" else _strip_ab(path),
+                "new_path": None,
+                "hunks": [],
+            }
+            current_hunk = None
+
+        elif raw_line.startswith("+++ ") and current is not None:
+            path = raw_line[4:].split("\t")[0].strip()
+            current["new_path"] = None if path == "/dev/null" else _strip_ab(path)
+
+        elif raw_line.startswith("@@ ") and current is not None:
+            # Flush previous hunk
+            if current_hunk is not None:
+                current["hunks"].append(current_hunk)
+            # Parse @@ -old_start[,old_count] +new_start[,new_count] @@
+            import re as _re
+            m = _re.match(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", raw_line)
+            if m:
+                current_hunk = {
+                    "old_start": int(m.group(1)),
+                    "old_count": int(m.group(2)) if m.group(2) is not None else 1,
+                    "new_start": int(m.group(3)),
+                    "new_count": int(m.group(4)) if m.group(4) is not None else 1,
+                    "lines": [],
+                }
+            else:
+                current_hunk = None
+
+        elif current_hunk is not None:
+            # Hunk body lines: ' ' context, '+' addition, '-' deletion
+            if raw_line.startswith(("+", "-", " ")):
+                current_hunk["lines"].append(raw_line)
+            # Lines starting with '\' (e.g. "\ No newline at end of file") are skipped
+
+    # Flush last hunk / record
+    if current is not None:
+        if current_hunk is not None:
+            current["hunks"].append(current_hunk)
+        records.append(current)
+
+    return records
+
+
+def _apply_hunks(original_lines: list[str], hunks: list[dict]) -> list[str]:
+    """Apply a list of parsed hunks to original_lines (0-indexed list, no newlines).
+
+    Returns the new list of lines.
+    """
+    result: list[str] = []
+    old_pos = 0  # 1-indexed position in original (matches hunk old_start)
+
+    for hunk in hunks:
+        old_start = hunk["old_start"]
+        # Copy unchanged lines before this hunk (old_pos..old_start-1)
+        while old_pos < old_start - 1:
+            if old_pos < len(original_lines):
+                result.append(original_lines[old_pos])
+            old_pos += 1
+
+        # Apply hunk lines
+        for hline in hunk["lines"]:
+            tag = hline[0] if hline else " "
+            text = hline[1:] if hline else ""
+            if tag == " ":
+                # Context line — copy from original
+                if old_pos < len(original_lines):
+                    result.append(original_lines[old_pos])
+                old_pos += 1
+            elif tag == "-":
+                # Deletion — skip the original line
+                old_pos += 1
+            elif tag == "+":
+                # Addition — insert new line
+                result.append(text)
+            # Other characters (e.g. '\\') are ignored
+
+    # Copy any remaining original lines after the last hunk
+    while old_pos < len(original_lines):
+        result.append(original_lines[old_pos])
+        old_pos += 1
+
+    return result
+
+
+@tool(args_schema=ApplyPatchInput)
+def apply_patch(patch: str, workspace: str = "") -> str:
+    """Apply a unified diff patch to one or more files atomically.
+
+    Parses standard unified diff format (as produced by 'git diff' or 'diff -u').
+    Supports creating new files (--- /dev/null) and deleting files (+++ /dev/null).
+
+    All file writes are collected first; if any write fails the already-written
+    files are rolled back to their original content.
+
+    Args:
+        patch: Unified diff text (--- a/file ... +++ b/file ... @@ ... @@).
+        workspace: Optional root directory for relative paths. Empty = workspace root.
+
+    Returns:
+        Summary of files patched, or an error message.
+    """
+    ws = workspace.strip() if workspace.strip() else config.WORKSPACE_DIR
+
+    records = _parse_unified_diff(patch)
+    if not records:
+        return "❌ Error: No valid file blocks found in patch."
+
+    # ── Phase 1: Parse + validate all file operations ────────
+    pending: list[tuple[str, str | None, str | None]] = []
+    # Each entry: (resolved_path, original_content_or_None, new_content_or_None)
+    # new_content = None → delete the file
+    # original_content = None → create new file
+
+    for rec in records:
+        old_path = rec["old_path"]
+        new_path = rec["new_path"]
+
+        # Determine target path (prefer new_path for rename/creation, old_path for deletion)
+        target_path = new_path if new_path is not None else old_path
+        if target_path is None:
+            return "❌ Error: Patch block has neither old nor new path."
+
+        # Security: resolve within workspace
+        resolved = resolve_path_safe(target_path, ws)
+        if resolved is None:
+            # Target path is outside workspace — try without workspace prefix
+            resolved = resolve_path_safe(target_path)
+        if resolved is None:
+            return f"❌ Error: Path '{target_path}' is outside the workspace boundary."
+
+        if new_path is None:
+            # File deletion
+            if not os.path.isfile(resolved):
+                return f"❌ Error: Cannot delete '{target_path}': file not found."
+            pending.append((resolved, open(resolved, "r", encoding="utf-8", errors="ignore").read(), None))
+            continue
+
+        if old_path is None:
+            # New file creation
+            if rec["hunks"]:
+                new_lines = []
+                for hunk in rec["hunks"]:
+                    for hline in hunk["lines"]:
+                        if hline.startswith("+"):
+                            new_lines.append(hline[1:])
+                new_content = "\n".join(new_lines)
+                # Preserve trailing newline if last addition had one
+                if new_lines and patch.rstrip().endswith("\n"):
+                    new_content += "\n"
+            else:
+                new_content = ""
+            pending.append((resolved, None, new_content))
+            continue
+
+        # Modification: read existing file, apply hunks
+        if not os.path.isfile(resolved):
+            return f"❌ Error: File '{target_path}' not found."
+        try:
+            with open(resolved, "r", encoding="utf-8", errors="ignore") as f:
+                original = f.read()
+        except Exception as e:
+            return f"❌ Error reading '{target_path}': {e}"
+
+        # Normalise to LF for hunk application; restore original line ending on write
+        original_le = "\r\n" if "\r\n" in original else "\n"
+        original_lf = original.replace("\r\n", "\n")
+        original_lines = original_lf.splitlines()
+
+        try:
+            new_lines = _apply_hunks(original_lines, rec["hunks"])
+        except Exception as e:
+            return f"❌ Error applying hunks to '{target_path}': {e}"
+
+        new_lf = "\n".join(new_lines)
+        # Restore trailing newline if original had one
+        if original_lf.endswith("\n") and not new_lf.endswith("\n"):
+            new_lf += "\n"
+
+        new_content = new_lf.replace("\n", original_le)
+        pending.append((resolved, original, new_content))
+
+    # ── Phase 2: Write atomically with rollback ──────────────
+    written: list[tuple[str, str | None]] = []  # (resolved_path, original_or_None)
+    patched_files: list[str] = []
+
+    for resolved, original, new_content in pending:
+        try:
+            if new_content is None:
+                # Delete file
+                os.remove(resolved)
+                written.append((resolved, original))
+                patched_files.append(f"  🗑  {resolved} (deleted)")
+            else:
+                # Create parent dirs if needed
+                parent = os.path.dirname(resolved)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                # newline="" prevents OS-level \n→\r\n conversion on Windows;
+                # line endings are already correct (LF or CRLF as per original).
+                with open(resolved, "w", encoding="utf-8", newline="") as f:
+                    f.write(new_content)
+                written.append((resolved, original))
+                action = "created" if original is None else "patched"
+                patched_files.append(f"  ✅ {resolved} ({action})")
+
+                # Store for frontend diff view
+                if original is not None:
+                    PENDING_DIFFS[resolved] = {"original": original, "modified": new_content}
+
+        except Exception as e:
+            # Roll back already-written files
+            for r_path, orig in written:
+                try:
+                    if orig is None:
+                        if os.path.isfile(r_path):
+                            os.remove(r_path)
+                    else:
+                        with open(r_path, "w", encoding="utf-8", newline="") as f:
+                            f.write(orig)
+                except Exception:
+                    pass
+            return (
+                f"❌ Write failed for '{resolved}': {e}. "
+                f"Rolled back {len(written)} file(s)."
+            )
+
+    return f"✅ Patch applied to {len(patched_files)} file(s):\n" + "\n".join(patched_files)
