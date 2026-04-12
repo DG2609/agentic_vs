@@ -8,7 +8,9 @@ from langgraph.graph.message import add_messages
 
 
 def _append_notifications(left: list[str], right: list[str]) -> list[str]:
-    """Reducer: append new notifications to existing ones."""
+    """Reducer: empty right = clear; non-empty right = append."""
+    if right == []:
+        return []
     return left + right
 
 

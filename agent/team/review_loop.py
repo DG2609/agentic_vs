@@ -70,13 +70,19 @@ class ReviewLoop:
             if attempt >= self.max_retries:
                 return ReviewResult(passed=False, exhausted=True, issues=issues)
 
-            retry_msg = (
-                f"The reviewer found issues (attempt {attempt + 1}/{self.max_retries}):\n\n"
-                f"{issues}\n\n"
-                f"Fix these issues in the changed files ({files_list}). "
-                f"Run tests again. Commit the fix and report the commit hash."
+            retry_prompt = (
+                f"A reviewer found issues with the implementation (attempt {attempt + 1}/{self.max_retries}).\n\n"
+                f"Changed files: {files_list}\n\n"
+                f"Issues found:\n{issues}\n\n"
+                f"Fix ALL of these issues. Read each affected file first, make the targeted changes, "
+                f"run tests to verify, commit the fix, and report the commit hash."
             )
-            self.pool.send_message(impl_worker_id, retry_msg)
+            impl_worker_id = await self.pool.spawn(
+                prompt=retry_prompt,
+                role="coder",
+                tools=self._get_coder_tools(),
+                description=f"Fix retry {attempt + 1}/{self.max_retries}",
+            )
 
         return ReviewResult(passed=False, exhausted=True, issues="max retries exceeded")
 
@@ -85,10 +91,10 @@ class ReviewLoop:
         Poll notification_queue until we find a notification for reviewer_id.
         Returns ('passed'|'failed', issues_text).
         """
-        deadline = asyncio.get_event_loop().time() + _REVIEW_TIMEOUT
+        deadline = asyncio.get_running_loop().time() + _REVIEW_TIMEOUT
         held: list[str] = []
 
-        while asyncio.get_event_loop().time() < deadline:
+        while asyncio.get_running_loop().time() < deadline:
             try:
                 notif = await asyncio.wait_for(
                     self.pool.notification_queue.get(),
@@ -132,6 +138,21 @@ class ReviewLoop:
                 code_search, grep_search, batch_read,
                 lsp_diagnostics, lsp_symbols,
                 code_quality, run_tests,
+            ]
+        except Exception:
+            return []
+
+    def _get_coder_tools(self) -> list:
+        """Coder tool set — read + write + tests + git."""
+        try:
+            from agent.tools.code_search import code_search, grep_search, batch_read
+            from agent.tools.file_ops import file_read, file_write, file_edit, glob_search
+            from agent.tools.test_runner import run_tests
+            from agent.tools.git import git_add, git_commit, git_status, git_diff
+            return [
+                file_read, file_write, file_edit, glob_search,
+                code_search, grep_search, batch_read,
+                run_tests, git_add, git_commit, git_status, git_diff,
             ]
         except Exception:
             return []

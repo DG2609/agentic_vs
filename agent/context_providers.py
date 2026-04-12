@@ -46,6 +46,10 @@ def _read_file(path: str, workspace: str) -> str:
         full_path = path
 
     full_path = os.path.realpath(full_path)
+    ws_real = os.path.realpath(workspace)
+    # Enforce workspace boundary (covers both absolute paths and traversal)
+    if not (full_path.startswith(ws_real + os.sep) or full_path == ws_real):
+        return f"[Access denied: path is outside workspace]"
 
     if not os.path.isfile(full_path):
         return f"[File not found: {path}]"
@@ -76,6 +80,8 @@ def _read_file(path: str, workspace: str) -> str:
 
 def _git_diff(ref: Optional[str], workspace: str) -> str:
     """Run git diff and return output."""
+    if ref and not re.fullmatch(r'[a-zA-Z0-9._/~^@{}\-]+', ref):
+        return f"[Invalid git ref: {ref!r}]"
     cmd = ["git", "diff"]
     if ref:
         cmd.append(ref)

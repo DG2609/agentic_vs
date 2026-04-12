@@ -234,12 +234,13 @@ async def _snapshot_pre_hook(tool_name: str, tool_args: dict):
     return None
 
 
-register_hook(
-    event="pre_tool_use",
-    pattern="file_*",
-    handler=_snapshot_pre_hook,
-    name="auto_snapshot",
-)
+for _snap_tool in _SNAPSHOT_TOOLS:
+    register_hook(
+        event="pre_tool_use",
+        pattern=_snap_tool,
+        handler=_snapshot_pre_hook,
+        name="auto_snapshot",
+    )
 
 
 class HookedToolNode:
@@ -265,7 +266,7 @@ class HookedToolNode:
             if hasattr(tool, "ainvoke"):
                 result = await tool.ainvoke(args)
             else:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(None, tool.invoke, args)
             if isinstance(result, str):
                 return result

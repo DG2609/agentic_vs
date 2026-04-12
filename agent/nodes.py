@@ -65,9 +65,23 @@ When you need multiple independent pieces of information, invoke multiple tools 
 - **Bad**: Call `file_read(A)`, wait, then call `file_read(B)` in a separate step.
 
 ## Anti-Patterns (NEVER DO THESE)
-- ❌ "Tôi sẽ sử dụng công cụ X để..." → Just call the tool silently
-- ❌ "Bạn muốn tiếp tục không?" → Continue automatically
+- ❌ Narrating what you're about to do instead of doing it → Call the tool silently
+- ❌ Asking "do you want to continue?" → Continue automatically
 - ❌ Copying raw file_list/file_read output into your response
+
+## Collaboration
+- If you notice the user's request is based on a misconception, or you spot a bug adjacent to what they asked about, flag it. You are a collaborator, not just an executor — users benefit from your judgment, not just your compliance.
+- If an approach fails, diagnose why before switching tactics. Don't retry the identical action blindly, and don't abandon a viable approach after a single failure.
+
+## Faithful Reporting
+- Report outcomes faithfully. If tests fail, say so with the relevant output. If you did not run a verification step, say that rather than implying it succeeded.
+- Never claim "all tests pass" when output shows failures. Never suppress or simplify failing checks (tests, lints, type errors) to manufacture a green result.
+- Equally, when a check did pass or a task is complete, state it plainly. Do not hedge confirmed results with disclaimers, or re-verify things you already checked.
+
+## Communicating with the User
+Before your first tool call each turn, briefly state what you're about to do (one sentence). While working, give short updates at key moments: when you find a root cause, when you change direction, when you make meaningful progress without an intermediate update.
+
+Write user-facing text in prose — complete sentences, not bullet fragments. Lead with the action or finding (inverted pyramid). Keep text between tool calls to ≤25 words. Keep final responses to ≤100 words unless the task requires more detail. Do not summarize what you just did at the end of a response.
 
 """
 
@@ -84,7 +98,6 @@ Rules:
 3. Use `code_quality` to assess file health before planning refactors.
 4. Use `dep_graph` to understand module dependencies before architectural changes.
 5. Use `memory_search` at session start to recall past decisions about this project.
-5. PRIORITY (Documentation): Propose comprehensive docs BEFORE implementation.
 6. Formulate a clear, step-by-step actionable plan.
 7. Hand off to the Coder agent to execute the plan.
 """
@@ -99,18 +112,32 @@ Rules:
 2. Use `run_tests` to verify your changes. Don't stop if there's an error — read the output and fix it.
 3. Use `terminal_exec` for builds and other shell commands.
 4. If the plan is fundamentally flawed or you need architectural guidance, call `handoff_to_planner`.
-5. Be concise. Focus on doing the work.
+5. Focus on doing the work. Fix root causes, not symptoms.
 6. **Git workflow**: After completing a logical unit of work, use `git_add` + `git_commit` to save progress.
    - Check `git_status` before committing to see exactly what changed.
    - Write clear commit messages describing WHAT changed and WHY.
    - Never commit broken code — run `run_tests` first.
 7. Use `memory_save` to persist important facts, patterns, or decisions for future sessions.
+
+## Code Comments
+- Default to writing no comments. Only add one when the WHY is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific bug, behavior that would surprise a reader.
+- Do not explain WHAT the code does — well-named identifiers already do that. Do not reference the current task, PR, or callers in comments; those belong in the commit message and rot as the codebase evolves.
+- Do not remove existing comments unless you're removing the code they describe or you can confirm they're wrong. A comment that looks pointless may encode a constraint from a past bug not visible in the current diff.
+
+## Verification
+- Before reporting a task complete, verify it actually works: run the test, execute the script, check the output. Minimum scope means no gold-plating, not skipping verification.
+- If you cannot verify (no test exists, cannot run the code), say so explicitly rather than claiming success.
 """
 
-# ── Compaction constants ────────────────────────────────────────
-COMPACTION_BUFFER = getattr(config, "COMPACTION_BUFFER", 20000)
-PRUNE_MINIMUM = getattr(config, "PRUNE_MINIMUM", 20000)
-PRUNE_PROTECT = getattr(config, "PRUNE_PROTECT", 40000)
+# ── Compaction constants (tuned to CC's exact values) ───────────
+# CC: effective_window = model_context - 20K; trigger at effective - 13K
+# So COMPACTION_BUFFER = 13K means we compact when 13K tokens from the edge.
+# Prior value was 20K which triggered too early and wasted context.
+COMPACTION_BUFFER = getattr(config, "COMPACTION_BUFFER", 13_000)
+PRUNE_MINIMUM = getattr(config, "PRUNE_MINIMUM", 20_000)
+PRUNE_PROTECT = getattr(config, "PRUNE_PROTECT", 40_000)
+# CC's MANUAL_COMPACT_BUFFER_TOKENS = 3K; floor for manual compaction
+MANUAL_COMPACT_BUFFER = 3_000
 
 # ── Doom loop detection ────────────────────────────────────────
 DOOM_LOOP_MAX = 3  # max identical consecutive tool calls before breaking
@@ -196,33 +223,55 @@ def get_llm(tools: list):
 # ─────────────────────────────────────────────────────────────
 # Retry wrapper for LLM invocation
 # ─────────────────────────────────────────────────────────────
-async def _invoke_with_retry(llm, messages: list, max_retries: int = 3) -> AIMessage:
-    """Invoke LLM with retry logic for transient failures.
+_RETRY_BASE_MS = 500          # 500 ms starting delay (matches CC BASE_DELAY_MS)
+_RETRY_MAX_MS = 32_000        # 32 s cap (matches CC max backoff)
+_RETRY_MAX_DEFAULT = 10       # default max attempts
+_RETRY_MAX_529 = 3            # overloaded responses get fewer retries (CC MAX_529_RETRIES)
 
-    Retries on connection errors and rate limits with exponential backoff.
+async def _invoke_with_retry(llm, messages: list, max_retries: int = _RETRY_MAX_DEFAULT) -> AIMessage:
+    """Invoke LLM with retry + exponential backoff matching CC's exact strategy.
+
+    - Base delay: 500 ms
+    - Multiplier: 2^(attempt) — so 500 ms, 1 s, 2 s, 4 s … capped at 32 s
+    - 529 Overloaded: max 3 retries regardless of max_retries
+    - 429 Rate-limit, 503, 502, timeout, connection: up to max_retries
     """
     import asyncio
     import traceback as _tb
+
+    overload_count = 0
 
     for attempt in range(max_retries):
         try:
             return await llm.ainvoke(messages)
         except Exception as e:
             err_msg = str(e).lower()
-            is_retryable = any(k in err_msg for k in [
+
+            is_529 = "529" in err_msg or "overloaded" in err_msg
+            is_retryable = is_529 or any(k in err_msg for k in [
                 "timeout", "connection", "rate_limit", "429", "503", "502",
-                "overloaded", "cudamalloc", "out of memory",
+                "econnreset", "econnrefused", "cudamalloc", "out of memory",
             ])
+
+            if is_529:
+                overload_count += 1
+                if overload_count >= _RETRY_MAX_529:
+                    logger.error(f"[llm] 529 overloaded — exceeded {_RETRY_MAX_529} overload retries, raising")
+                    raise
+
             if is_retryable and attempt < max_retries - 1:
-                wait = 2 ** attempt
+                wait_ms = min(_RETRY_BASE_MS * (2 ** attempt), _RETRY_MAX_MS)
+                wait_s = wait_ms / 1000
                 logger.warning(
-                    f"[llm] Retryable error on attempt {attempt + 1}/{max_retries}: "
-                    f"{type(e).__name__}: {e} — retrying in {wait}s"
+                    f"[llm] Retryable error attempt {attempt + 1}/{max_retries} "
+                    f"({'529-overload' if is_529 else 'transient'}): "
+                    f"{type(e).__name__} — retrying in {wait_s:.1f}s"
                 )
-                await asyncio.sleep(wait)
+                await asyncio.sleep(wait_s)
                 continue
+
             logger.error(
-                f"[llm] Fatal error after {attempt + 1} attempt(s): "
+                f"[llm] Fatal after {attempt + 1} attempt(s): "
                 f"{type(e).__name__}: {e}\n{_tb.format_exc()}"
             )
             raise
@@ -447,11 +496,11 @@ def _prune_tool_outputs(messages: list) -> list:
 
     # Calculate protected zone: last PRUNE_PROTECT tokens
     tail_tokens = 0
-    protect_from = 0  # default: nothing protected, prune everything eligible
+    protect_from = len(messages)  # default: protect everything (nothing to prune)
     for i in range(len(messages) - 1, -1, -1):
         tail_tokens += _msg_tokens(messages[i])
         if tail_tokens >= PRUNE_PROTECT:
-            protect_from = i
+            protect_from = i + 1  # protect from i onward (inclusive)
             break
 
     pruned = []
@@ -499,9 +548,10 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
         system_content = CODER_PROMPT
         llm = llm_coder
 
-    # Coordinator mode overrides planner prompt
+    # Coordinator mode overrides both prompt and LLM binding
     if getattr(state, 'coordinator_mode', False) or is_coordinator_mode():
         system_content = get_coordinator_system_prompt()
+        llm = llm_planner  # coordinator delegates writes to workers, never does them directly
 
     # Inject project rules
     rules = _load_project_rules(state.workspace or config.WORKSPACE_DIR)
@@ -564,34 +614,68 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
 # Compaction template
 # ─────────────────────────────────────────────────────────────
 COMPACTION_TEMPLATE = """\
-Analyze the conversation and create a structured summary for continuing work.
-Focus on preserving actionable context and decisions.
+Your task is to create a concise but complete summary of a conversation so work can resume \
+without loss of context. Output in two XML blocks: <analysis> for your private scratchpad \
+(will be stripped), then <summary> with the final 9-section structured summary.
 
-Conversation messages:
+Conversation:
 {conversation}
 
 {previous_summary}
 
-Generate a summary with EXACTLY this structure:
+Output format (use EXACTLY these tags):
 
-## Goal
-What the user is trying to accomplish (1-2 sentences)
+<analysis>
+[Your private reasoning: what's important, what to include, what to cut. This section is \
+discarded — use it to think clearly before writing the summary.]
+</analysis>
 
-## Key Instructions
-Specific requirements or constraints from the user (bullet list)
+<summary>
+## 1. Primary Request and Intent
+What the user wants to accomplish. The core goal driving this entire conversation. \
+Capture the "why", not just the "what".
 
-## Discoveries
-Important facts, code patterns, file locations found during work (bullet list)
+## 2. Key Technical Concepts
+Key design decisions, patterns, algorithms, data structures, or APIs that are central \
+to this work. Include non-obvious relationships between components.
 
-## Accomplished
-What has been completed so far (bullet list with file paths)
+## 3. Files and Code Sections
+Files read or modified, with their purpose:
+- path/to/file.py — what it does, why it matters, key functions/classes touched
 
-## Active Files
-Files that were read/modified with brief context (bullet list: path — description)
+## 4. Errors and Fixes
+Errors encountered and how they were resolved. Include root cause if known.
 
-## Next Steps
-What was about to happen or still needs to be done (bullet list)
+## 5. Problem Solving
+Approaches tried, dead ends, key insights. What worked and what didn't.
+
+## 6. All User Messages
+Verbatim or near-verbatim list of every user message in the conversation. \
+This preserves their intent and tone exactly.
+
+## 7. Pending Tasks
+Tasks started but not finished, or explicitly planned but not yet started.
+
+## 8. Current Work
+Exact state of the work immediately before compaction: \
+what was being done, what file was open, what step was in progress.
+
+## 9. Optional Next Step
+The single most important next action, if it is clear.
+</summary>
 """
+
+def _extract_compact_summary(raw: str) -> str:
+    """Strip <analysis> block and unwrap <summary> tags — matches CC formatCompactSummary()."""
+    # Remove <analysis>...</analysis>
+    import re
+    raw = re.sub(r"<analysis>.*?</analysis>", "", raw, flags=re.DOTALL).strip()
+    # Unwrap <summary> tags, keep content
+    m = re.search(r"<summary>(.*?)</summary>", raw, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # No tags — just return cleaned text (fallback for models that ignore format)
+    return raw.strip()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -654,12 +738,15 @@ async def summarize_node(state: AgentState) -> dict:
     llm = _create_llm(streaming=False, temperature=0.1, fast=True)
     response = await llm.ainvoke([HumanMessage(content=prompt)])
 
+    # Strip <analysis> scratchpad, extract <summary> content (CC formatCompactSummary)
+    summary_text = _extract_compact_summary(response.content)
+
     # Remove old messages, keep recent ones
     delete_messages = [RemoveMessage(id=m.id) for m in to_summarize
                        if hasattr(m, "id") and m.id]
 
     result = {
-        "summary": response.content,
+        "summary": summary_text,
         "messages": delete_messages,
     }
 

@@ -7,10 +7,36 @@ The coordinator polls the queue and injects notifications into its stream.
 """
 import asyncio
 import logging
-import uuid
+import random
+import string
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
+
+# Role → single-char prefix for human-readable worker IDs (CC-style)
+_ROLE_PREFIX = {
+    "explorer":  "e",
+    "architect": "a",
+    "coder":     "c",
+    "reviewer":  "r",
+    "qa":        "q",
+    "lead":      "l",
+    "general":   "g",
+}
+_ID_ALPHABET = string.ascii_lowercase + string.digits  # 36-char set
+
+def _generate_worker_id(role: str) -> str:
+    """Generate a prefixed, human-readable worker ID.
+
+    Format: <role-prefix>-<8 random chars>
+    E.g.: c-k7mn2pxz  (coder), r-a9bq3wef  (reviewer)
+
+    Matches CC's prefix-based task ID scheme — easier to read in logs
+    and team_status output than bare UUIDs.
+    """
+    prefix = _ROLE_PREFIX.get(role, "g")
+    suffix = "".join(random.choices(_ID_ALPHABET, k=8))
+    return f"{prefix}-{suffix}"
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 from agent.tools.truncation import truncate_output
@@ -19,20 +45,51 @@ logger = logging.getLogger(__name__)
 
 _ROLE_PROMPTS = {
     "explorer": (
-        "You are a read-only code explorer. Search, read, and analyse the codebase. "
-        "Report findings clearly. Do NOT modify any files."
+        "You are a read-only code explorer. Your job is to investigate, search, and understand "
+        "the codebase — never to modify it. Use file_read, code_search, grep_search, "
+        "lsp_diagnostics, and code_quality. Report findings with specific file paths, line "
+        "numbers, and type signatures. Write durable findings to the shared scratchpad when "
+        "instructed. Do NOT modify any files under any circumstances."
+    ),
+    "architect": (
+        "You are a software architect. Analyse the codebase structure, identify design problems, "
+        "and produce clear technical recommendations. Do NOT write implementation code — your "
+        "output is a design document with file paths, module boundaries, and dependency graphs. "
+        "Write findings to the scratchpad."
     ),
     "coder": (
-        "You are a software engineer. Implement the task as specified. "
-        "Read files before editing. Run tests after changes. Commit your work."
+        "You are a precise software engineer. Implement the task exactly as specified. "
+        "Steps: (1) read the relevant files before editing, (2) make targeted, minimal changes — "
+        "fix the root cause, not symptoms, (3) run tests for the changed module and fix any "
+        "failures, (4) commit the changes, (5) report what changed, test results, and commit hash. "
+        "Do not break existing tests. Do not refactor beyond the task scope."
     ),
     "reviewer": (
-        "You are a senior code reviewer. Run LSP diagnostics and tests on the changed files. "
-        "Return 'PASSED ✅' or 'FAILED ❌' as the first line, then list specific issues."
+        "You are a senior code reviewer. Your job is to PROVE the code works — not to rubber-stamp it. "
+        "Steps: (1) read every changed file, (2) run lsp_diagnostics — investigate every error, "
+        "do not dismiss any as 'unrelated' without evidence, (3) run tests with the feature enabled "
+        "and note all failures, (4) check edge cases and error paths the implementation may have "
+        "missed. First line of response MUST be 'PASSED ✅' or 'FAILED ❌'. Then list specific "
+        "issues with file:line references. Be skeptical — if something looks off, dig in."
+    ),
+    "qa": (
+        "You are a QA engineer focused on edge cases and regressions. Run the full test suite, "
+        "check for regressions in modules that depend on the changed code, test error paths and "
+        "boundary conditions. Report: (1) which tests pass/fail, (2) uncovered edge cases, "
+        "(3) behaviour that looks wrong even if no test catches it. "
+        "First line MUST be 'PASSED ✅' or 'FAILED ❌'."
+    ),
+    "lead": (
+        "You are a sub-team lead. Coordinate the workers under you to accomplish the given goal. "
+        "Break the goal into subtasks, delegate to workers with the right roles, synthesize "
+        "results, and report a complete summary. Never fabricate worker results — wait for their "
+        "notifications. Never say 'based on your findings' — synthesize the findings yourself "
+        "into a specific spec before delegating."
     ),
     "general": (
-        "You are a general-purpose software engineering agent. "
-        "Research, analyse, and implement tasks. Be thorough and concise."
+        "You are a general-purpose software engineering agent. Research, analyse, and implement "
+        "tasks as needed. Be thorough, precise, and concise. Fix root causes, not symptoms. "
+        "Read files before editing. Run tests after changes. Commit your work."
     ),
 }
 
@@ -72,8 +129,8 @@ class WorkerPool:
         max_steps: int = 30,
         team: Optional[str] = None,
     ) -> str:
-        """Spawn a new worker. Returns worker UUID."""
-        worker_id = str(uuid.uuid4())
+        """Spawn a new worker. Returns role-prefixed worker ID."""
+        worker_id = _generate_worker_id(role)
         llm = _create_worker_llm()
         task = asyncio.create_task(
             self._worker_loop(worker_id, prompt, role, tools, max_steps, llm),
@@ -162,7 +219,8 @@ class WorkerPool:
                     messages.append(HumanMessage(content=msg))
                     logger.debug(f"[worker {worker_id[:8]}] ingested coordinator message")
 
-                response = await llm_with_tools.ainvoke(messages)
+                from agent.nodes import _invoke_with_retry
+                response = await _invoke_with_retry(llm_with_tools, messages)
                 messages.append(response)
 
                 if not getattr(response, "tool_calls", None):
@@ -214,7 +272,7 @@ class WorkerPool:
         try:
             if hasattr(tool, "ainvoke"):
                 return await tool.ainvoke(args)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             return await loop.run_in_executor(None, tool.invoke, args)
         except Exception as e:
             return f"Error in {name}: {e}"

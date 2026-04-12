@@ -9,6 +9,7 @@ Supports:
 
 import os
 import sqlite3
+import threading
 import time
 import fnmatch
 import logging
@@ -56,6 +57,65 @@ def set_permission_callback(cb: Optional[Callable[..., Awaitable[str]]]) -> None
     """Set async callback for interactive permission prompts."""
     global _permission_callback
     _permission_callback = cb
+
+
+# ── Denial tracking (CC: DENIAL_LIMITS) ─────────────────────────
+# After _MAX_CONSECUTIVE_DENIALS in a row, or _MAX_TOTAL_DENIALS total,
+# the agent falls back to auto-allowing rather than looping forever.
+_MAX_CONSECUTIVE_DENIALS = 3
+_MAX_TOTAL_DENIALS = 20
+
+_denial_state = threading.local()
+
+
+def _get_counters():
+    """Get (or initialize) per-thread denial counters."""
+    if not hasattr(_denial_state, 'consecutive'):
+        _denial_state.consecutive = 0
+        _denial_state.total = 0
+    return _denial_state
+
+
+def record_denial() -> dict:
+    """Increment denial counters. Returns {consecutive, total, bypass_active}."""
+    s = _get_counters()
+    s.consecutive += 1
+    s.total += 1
+    bypass = (
+        s.consecutive >= _MAX_CONSECUTIVE_DENIALS
+        or s.total >= _MAX_TOTAL_DENIALS
+    )
+    if bypass:
+        logger.warning(
+            f"[permissions] denial limit reached "
+            f"(consecutive={s.consecutive}, total={s.total}) — auto-allowing"
+        )
+    return {
+        "consecutive": s.consecutive,
+        "total": s.total,
+        "bypass_active": bypass,
+    }
+
+
+def record_allow() -> None:
+    """Reset consecutive denial counter on a successful allow."""
+    _get_counters().consecutive = 0
+
+
+def reset_denial_counters() -> None:
+    """Reset all denial counters (call at session start)."""
+    s = _get_counters()
+    s.consecutive = 0
+    s.total = 0
+
+
+def is_denial_bypass_active() -> bool:
+    """True when denial thresholds are exceeded and agent should auto-allow."""
+    s = _get_counters()
+    return (
+        s.consecutive >= _MAX_CONSECUTIVE_DENIALS
+        or s.total >= _MAX_TOTAL_DENIALS
+    )
 
 
 def save_permission(tool_pattern: str, decision: str, file_pattern: str = "*") -> int:
@@ -140,6 +200,10 @@ def get_decision(tool_name: str, file_path: str = "") -> str:
 async def check_permission(tool_name: str, args: dict) -> tuple[bool, str]:
     """Check if a tool is allowed to run.
 
+    Integrates denial tracking: after _MAX_CONSECUTIVE_DENIALS consecutive
+    denials or _MAX_TOTAL_DENIALS total, auto-allows to prevent agent lock-up
+    (matches CC's DENIAL_LIMITS behaviour).
+
     Returns:
         (allowed: bool, reason: str)
     """
@@ -150,27 +214,43 @@ async def check_permission(tool_name: str, args: dict) -> tuple[bool, str]:
     decision = get_decision(tool_name, file_path)
 
     if decision == "allow":
+        record_allow()
         return True, ""
     if decision == "deny":
+        record_denial()
         return False, f"Permission denied for {tool_name}"
 
-    # decision == "ask" — prompt via callback
+    # decision == "ask" — check bypass first (CC: avoid infinite ask loops)
+    if is_denial_bypass_active():
+        logger.info(f"[permissions] bypass active — auto-allowing {tool_name}")
+        record_allow()
+        return True, "auto-allowed (denial limit reached)"
+
+    # Prompt via callback
     if _permission_callback:
         try:
             result = await _permission_callback(tool_name, args)
             if result == "always_allow":
                 save_permission(tool_name, "allow")
+                record_allow()
                 return True, ""
             elif result == "always_deny":
                 save_permission(tool_name, "deny")
+                record_denial()
                 return False, f"Permission denied for {tool_name} (saved)"
             elif result in ("allow", "yes"):
+                record_allow()
                 return True, ""
             else:
-                return False, f"Permission denied for {tool_name}"
+                info = record_denial()
+                reason = f"Permission denied for {tool_name}"
+                if info["bypass_active"]:
+                    reason += " — denial limit reached, future calls will auto-allow"
+                return False, reason
         except Exception as e:
             logger.warning(f"Permission callback error for {tool_name}: {e}")
             return True, ""  # fail open
 
     # No callback (headless / CLI) — default allow
+    record_allow()
     return True, ""

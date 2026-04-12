@@ -26,6 +26,13 @@ from models.tool_schemas import (
 PENDING_DIFFS: dict[str, dict[str, str]] = {}
 
 
+# Device paths that cause infinite reads / hangs — block them (CC: FileReadTool)
+_BLOCKED_DEVICE_PATHS = frozenset({
+    "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom",
+    "/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr",
+})
+
+
 @tool(args_schema=FileReadArgs)
 def file_read(file_path: str, start_line: int = 0, end_line: int = 0) -> str:
     """Read the contents of a file.
@@ -38,7 +45,18 @@ def file_read(file_path: str, start_line: int = 0, end_line: int = 0) -> str:
     Returns:
         File contents with line numbers, or error message.
     """
+    # Block infinite-read device paths (CC: prevents hangs on /dev/zero etc.)
+    normalized = file_path.replace("\\", "/").rstrip("/")
+    if normalized in _BLOCKED_DEVICE_PATHS:
+        return f"Error: Reading '{file_path}' is not allowed (device path)."
+
     resolved = _resolve_path(file_path)
+
+    # Block again after path resolution
+    resolved_norm = resolved.replace("\\", "/")
+    if any(resolved_norm == d or resolved_norm.startswith(d + "/") for d in _BLOCKED_DEVICE_PATHS):
+        return f"Error: Reading '{file_path}' is not allowed (device path)."
+
     if not os.path.isfile(resolved):
         return f"Error: File '{file_path}' not found."
 
@@ -410,12 +428,14 @@ def file_edit_batch(edits: list) -> str:
 
         pending.append((resolved, file_path, content, new_content))
 
-    # Phase 2: write all (in order — no partial rollback needed as phase 1 validated all)
+    # Phase 2: write all with rollback on failure
     results = []
+    written: list[tuple[str, str]] = []  # (resolved_path, original_content)
     for resolved, file_path, old_content, new_content in pending:
         try:
             with open(resolved, "w", encoding="utf-8") as f:
                 f.write(new_content)
+            written.append((resolved, old_content))
 
             PENDING_DIFFS[resolved] = {"original": old_content, "modified": new_content}
 
@@ -426,7 +446,14 @@ def file_edit_batch(edits: list) -> str:
             removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
             results.append(f"  ✅ {file_path} (+{added}/-{removed} lines)")
         except Exception as e:
-            results.append(f"  ⚠️ {file_path} — write failed: {e}")
+            # Roll back all already-written files
+            for r_path, original in written:
+                try:
+                    with open(r_path, "w", encoding="utf-8") as f:
+                        f.write(original)
+                except Exception:
+                    pass  # best-effort rollback
+            return f"❌ Write failed on {file_path}: {e}. Rolled back {len(written)} file(s)."
 
     return f"✅ Batch edit applied {len(results)}/{len(normalized)} files:\n" + "\n".join(results)
 
@@ -500,6 +527,11 @@ def glob_search(pattern: str, directory: str = "") -> str:
     Returns:
         List of matching files.
     """
+    # Block Windows UNC paths that can trigger NTLM credential leaks (CC: GlobTool)
+    dir_norm = (directory or "").replace("\\", "/")
+    if dir_norm.startswith("//") or dir_norm.startswith("\\\\"):
+        return "Error: UNC paths are not allowed."
+
     # Sandbox directory parameter to workspace boundary
     if directory:
         target = resolve_tool_path(directory)
@@ -508,37 +540,52 @@ def glob_search(pattern: str, directory: str = "") -> str:
     if not os.path.isdir(target):
         return f"Error: Directory '{target}' does not exist."
 
+    # Block UNC after resolution too
+    target_norm = target.replace("\\", "/")
+    if target_norm.startswith("//") or target_norm.startswith("\\\\"):
+        return "Error: UNC paths are not allowed."
+
     search_pattern = os.path.join(target, pattern)
-    
+
     try:
         # recursive=True needed for ** usage
         matches = glob.glob(search_pattern, recursive=True)
     except Exception as e:
         return f"Error during glob search: {e}"
-    
+
     # Filter out ignored dirs
     filtered = []
     ignore = {
         "__pycache__", ".git", "node_modules", ".venv", "venv",
         "env", "dist", "build", ".next", ".cache",
     }
-    
+
     for m in matches:
         if os.path.isdir(m):
             continue
-        
+
         # Check if any part of path is in ignore list
         rel = os.path.relpath(m, target)
         parts = rel.split(os.sep)
         if any(p in ignore for p in parts):
             continue
-            
+
         filtered.append(rel)
-        
+
     if not filtered:
         return f"No files found for pattern '{pattern}' in {target}"
+
+    # Cap at 100 results — mark truncated (CC: GlobTool MAX_RESULTS = 100)
+    _GLOB_MAX = 100
+    truncated = len(filtered) > _GLOB_MAX
+    if truncated:
+        filtered = filtered[:_GLOB_MAX]
         
-    return truncate_output(f"Found {len(filtered)} files for '{pattern}':\n" + "\n".join(sorted(filtered)))
+    result = f"Found {len(filtered)} file(s) for '{pattern}'"
+    if truncated:
+        result += f" (showing first {_GLOB_MAX} — use a more specific pattern for full results)"
+    result += ":\n" + "\n".join(sorted(filtered))
+    return truncate_output(result)
 
 
 def _tree(path: str, prefix: str, depth: int, max_depth: int, show_size: bool, lines: list):
