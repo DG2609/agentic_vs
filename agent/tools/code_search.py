@@ -296,10 +296,31 @@ def batch_read(
     if len(file_paths) > _BATCH_LIMIT:
         return f"Error: Maximum {_BATCH_LIMIT} files per batch. Please split into smaller batches."
 
+    # Import device path block list from file_ops for consistent protection
+    from agent.tools.file_ops import _BLOCKED_DEVICE_PATHS
+
     results = []
 
     for fp in file_paths:
+        # Block device paths that cause infinite reads / hangs
+        fp_norm = fp.replace("\\", "/").rstrip("/")
+        if fp_norm in _BLOCKED_DEVICE_PATHS:
+            results.append(f"❌ {fp} — Device path not allowed\n")
+            continue
+
         resolved = _resolve_path(fp)
+        resolved_norm = resolved.replace("\\", "/")
+        if any(resolved_norm == d or resolved_norm.startswith(d + "/") for d in _BLOCKED_DEVICE_PATHS):
+            results.append(f"❌ {fp} — Device path not allowed\n")
+            continue
+        if resolved_norm.startswith("/proc/") and (
+            resolved_norm.endswith("/fd/0")
+            or resolved_norm.endswith("/fd/1")
+            or resolved_norm.endswith("/fd/2")
+        ):
+            results.append(f"❌ {fp} — stdio alias not allowed\n")
+            continue
+
         if not os.path.isfile(resolved):
             results.append(f"❌ {fp} — File not found\n")
             continue
