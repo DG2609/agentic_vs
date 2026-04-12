@@ -9,6 +9,7 @@ import asyncio
 import logging
 import random
 import string
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -113,12 +114,24 @@ class WorkerEntry:
     pending_messages: asyncio.Queue = field(default_factory=asyncio.Queue)
 
 
+def _add_child_abort(parent_task: asyncio.Task, child_task: asyncio.Task) -> None:
+    """Cancel child task when parent task completes/is cancelled."""
+    ref: weakref.ref = weakref.ref(child_task)
+
+    def on_parent_done(t: asyncio.Task) -> None:
+        c = ref()
+        if c is not None and not c.done():
+            c.cancel()
+
+    parent_task.add_done_callback(on_parent_done)
+
+
 class WorkerPool:
     """Registry and runner for async agent workers."""
 
     def __init__(self):
         self._workers: dict[str, WorkerEntry] = {}
-        self.notification_queue: asyncio.Queue = asyncio.Queue()
+        self.notification_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
 
     async def spawn(
         self,
@@ -288,5 +301,17 @@ class WorkerPool:
             f"<result>{result[:2000]}</result>\n"
             f"</task-notification>"
         )
-        await self.notification_queue.put(notification)
+        try:
+            self.notification_queue.put_nowait(notification)
+        except asyncio.QueueFull:
+            # Queue is full — drop oldest notification and warn
+            try:
+                self.notification_queue.get_nowait()
+                logger.warning(
+                    "[pool] notification_queue full (maxsize=%d) — dropped oldest notification",
+                    self.notification_queue.maxsize,
+                )
+                self.notification_queue.put_nowait(notification)
+            except Exception:
+                pass  # If still full, silently drop
         logger.info(f"[pool] notification pushed for {worker_id[:8]}: {status}")
