@@ -24,6 +24,7 @@ from models.state import AgentState
 import config
 from agent.tools.truncation import estimate_tokens
 from agent.team.coordinator import is_coordinator_mode, get_coordinator_system_prompt
+from agent.rules_loader import load_project_rules
 
 logger = logging.getLogger(__name__)
 
@@ -555,10 +556,10 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
         system_content = get_coordinator_system_prompt()
         llm = llm_planner  # coordinator delegates writes to workers, never does them directly
 
-    # Inject project rules
-    rules = _load_project_rules(state.workspace or config.WORKSPACE_DIR)
+    # Inject project rules (hierarchical: global → project → local → rules/)
+    rules = load_project_rules(workspace=state.workspace or config.WORKSPACE_DIR)
     if rules:
-        system_content += f"\n\n{rules}"
+        system_content += f"\n\n---\n## Project Rules\n{rules}"
 
     # Inject model-aware edit instructions
     from agent.model_aware import get_edit_instruction
@@ -666,6 +667,75 @@ what was being done, what file was open, what step was in progress.
 The single most important next action, if it is clear.
 </summary>
 """
+
+def _strip_images(messages: list) -> list:
+    """Remove image_url content blocks and base64 image data from messages.
+    Replaces with a placeholder: '[image stripped before compaction]'
+    """
+    stripped = []
+    for msg in messages:
+        if hasattr(msg, 'content') and isinstance(msg.content, list):
+            new_content = []
+            for block in msg.content:
+                if isinstance(block, dict) and block.get('type') == 'image_url':
+                    new_content.append({'type': 'text', 'text': '[image stripped before compaction]'})
+                elif isinstance(block, dict) and block.get('type') == 'image':
+                    new_content.append({'type': 'text', 'text': '[image stripped before compaction]'})
+                else:
+                    new_content.append(block)
+            # Replace content but keep same message type
+            extra = {k: v for k, v in vars(msg).items() if k != 'content'}
+            msg = msg.__class__(content=new_content, **extra)
+        stripped.append(msg)
+    return stripped
+
+
+def _extract_skill_names_from_messages(messages: list) -> list[str]:
+    """Scan message history for skill_invoke tool calls and return unique skill names (order preserved)."""
+    seen: dict[str, int] = {}  # name -> last-seen index
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, AIMessage):
+            continue
+        for tc in getattr(msg, "tool_calls", None) or []:
+            if tc.get("name") == "skill_invoke":
+                skill_name = tc.get("args", {}).get("name", "")
+                if skill_name:
+                    seen[skill_name] = i
+    # Return names sorted by last-seen index ascending (LRU last), capped at 3
+    sorted_names = sorted(seen, key=lambda n: seen[n])
+    return sorted_names[-3:]
+
+
+_SKILL_CONTENT_CAP = 4000   # 4 KB per skill
+_SKILL_REINJECT_MAX = 3     # max skills to re-inject
+
+
+def _build_skill_reinjection_messages(messages: list) -> list:
+    """Re-inject the content of active skills that were invoked during the session.
+
+    Returns up to _SKILL_REINJECT_MAX HumanMessages (one per skill).
+    Total content capped at _SKILL_REINJECT_MAX x _SKILL_CONTENT_CAP.
+    """
+    from agent.skill_engine import invoke_skill
+
+    names = _extract_skill_names_from_messages(messages)
+    result = []
+    for name in names[:_SKILL_REINJECT_MAX]:
+        try:
+            content, meta = invoke_skill(name)
+            if meta is None:
+                # Skill not found — skip silently
+                continue
+            snippet = content[:_SKILL_CONTENT_CAP]
+            result.append(
+                HumanMessage(
+                    content=f"[Post-compact context] Active skill '{name}':\n{snippet}"
+                )
+            )
+        except Exception as e:
+            logger.warning(f"[compact] Failed to re-inject skill '{name}': {e}")
+    return result
+
 
 def _collect_recent_file_paths(messages: list, max_files: int = 5) -> list[str]:
     """Scan message history for file_read/file_write tool calls and return
@@ -814,9 +884,12 @@ async def summarize_node(state: AgentState) -> dict:
     keep_count = 6
     to_summarize = pruned_messages[:-keep_count] if len(pruned_messages) > keep_count else pruned_messages
 
+    # Strip images before passing to the summarization LLM to save tokens
+    to_summarize_stripped = _strip_images(to_summarize)
+
     # Build conversation text for LLM
     conv_parts = []
-    for msg in to_summarize:
+    for msg in to_summarize_stripped:
         role = type(msg).__name__
         content = getattr(msg, "content", "")
         if isinstance(content, str) and content:
@@ -849,9 +922,14 @@ async def summarize_node(state: AgentState) -> dict:
     # read/written during the session, so the LLM retains file context.
     restoration_messages = _build_file_restoration_messages(messages)
 
+    # ── Post-compact skill re-injection ──────────────────────────
+    # Re-inject content of skills that were invoked during the session.
+    # Capped at 3 skills x 4 KB = 12 KB max.
+    skill_messages = _build_skill_reinjection_messages(messages)
+
     result = {
         "summary": summary_text,
-        "messages": delete_messages + restoration_messages,
+        "messages": delete_messages + restoration_messages + skill_messages,
     }
 
     if LIFECYCLE_HOOKS:
