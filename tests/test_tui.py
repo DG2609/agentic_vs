@@ -10,6 +10,7 @@ import pytest
 # Import helpers directly — textual is installed
 from tui import (
     _short_path, _tool_label, _fmt_elapsed, _get_model_name, _get_workspace,
+    _preprocess_markdown, _format_tool_tree,
     TOOL_ICONS, COMMANDS, AGENT_COLORS, VERSION,
 )
 
@@ -187,3 +188,85 @@ def test_get_workspace():
 
 def test_version():
     assert VERSION == "3.0.0"
+
+
+# ── _preprocess_markdown ──────────────────────────────────────
+
+def test_preprocess_markdown_single_tilde_integer():
+    """~100~ (approximation) should be stripped to 100."""
+    assert _preprocess_markdown("~100~") == "100"
+
+
+def test_preprocess_markdown_single_tilde_float():
+    assert _preprocess_markdown("~3.14~") == "3.14"
+
+
+def test_preprocess_markdown_preserves_double_tilde():
+    """~~text~~ is intentional strikethrough — must not be touched."""
+    assert _preprocess_markdown("~~strike~~") == "~~strike~~"
+
+
+def test_preprocess_markdown_inline_number():
+    result = _preprocess_markdown("approximately ~50~ tokens used")
+    assert result == "approximately 50 tokens used"
+
+
+def test_preprocess_markdown_mixed():
+    result = _preprocess_markdown("~10~ lines, ~~deleted text~~, ~20~ chars")
+    assert result == "10 lines, ~~deleted text~~, 20 chars"
+
+
+def test_preprocess_markdown_no_change_for_plain_text():
+    text = "No tildes here at all."
+    assert _preprocess_markdown(text) == text
+
+
+def test_preprocess_markdown_no_change_for_non_numeric_tilde():
+    """~word~ (non-numeric) is not touched — only numeric spans."""
+    text = "~word~"
+    assert _preprocess_markdown(text) == text
+
+
+# ── _format_tool_tree ─────────────────────────────────────────
+
+def test_format_tool_tree_empty():
+    assert _format_tool_tree({}) == ""
+
+
+def test_format_tool_tree_single_running():
+    tools = {"run1": {"tool_name": "file_read", "done": False}}
+    result = _format_tool_tree(tools)
+    assert "└─" in result
+    assert "⟳" in result
+    assert "file_read" in result
+
+
+def test_format_tool_tree_single_done():
+    tools = {"run1": {"tool_name": "grep_search", "done": True}}
+    result = _format_tool_tree(tools)
+    assert "✓" in result
+    assert "grep_search" in result
+
+
+def test_format_tool_tree_multiple():
+    tools = {
+        "r1": {"tool_name": "file_read", "done": True},
+        "r2": {"tool_name": "terminal_exec", "done": False},
+    }
+    result = _format_tool_tree(tools)
+    lines = result.split("\n")
+    assert len(lines) == 2
+    assert "├─" in lines[0]   # first item not last
+    assert "└─" in lines[1]   # last item
+    assert "✓" in lines[0]
+    assert "⟳" in lines[1]
+
+
+def test_format_tool_tree_last_prefix():
+    """Only the final entry should have the └─ prefix."""
+    tools = {f"r{i}": {"tool_name": f"tool_{i}", "done": False} for i in range(3)}
+    result = _format_tool_tree(tools)
+    lines = result.split("\n")
+    assert lines[-1].startswith("└─")
+    for line in lines[:-1]:
+        assert line.startswith("├─")
