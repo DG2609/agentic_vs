@@ -244,6 +244,130 @@ class TestCCParityValidators:
         assert safe("cd /tmp && ls")
 
 
+# ── CC-sourced advanced validators ────────────────────────────────────────────
+
+class TestCCAdvancedValidators:
+    """Tests for the 6 validators ported from Claude Code's bashSecurity.ts."""
+
+    # 19. ANSI-C quoting ($'...' or $"...")
+    def test_ansi_c_single_quote_blocked(self):
+        """$'\\x72\\x6d' decodes to 'rm' — must be blocked."""
+        assert blocked(r"$'\x72\x6d' -rf /tmp/x")
+
+    def test_ansi_c_double_quote_blocked(self):
+        """$\"...\" ANSI-C form must also be blocked."""
+        assert blocked('$"\\x6c\\x73" -la')
+
+    def test_ansi_c_in_command_blocked(self):
+        """ANSI-C quoting embedded in a longer command."""
+        assert blocked(r"echo $'\x68\x65\x6c\x6c\x6f'")
+
+    def test_normal_single_quote_safe(self):
+        """Plain single-quoted strings must not trigger the ANSI-C rule."""
+        assert safe("echo 'hello world'")
+
+    def test_normal_double_quote_safe(self):
+        """Plain double-quoted strings must not trigger the ANSI-C rule."""
+        assert safe('echo "hello world"')
+
+    # 20. Variable expansion in pipe or redirect
+    def test_var_in_pipe_blocked(self):
+        """$FILE | cmd — variable expansion as pipe source."""
+        assert blocked("$FILE | sort")
+
+    def test_var_brace_in_pipe_blocked(self):
+        """${FILE} | cmd — braced variable expansion as pipe source."""
+        assert blocked("${FILE} | sort")
+
+    def test_var_in_redirect_blocked(self):
+        """cmd < $VAR — variable used as redirect source."""
+        assert blocked("cat < $SECRET_FILE")
+
+    def test_var_brace_in_redirect_blocked(self):
+        """cmd < ${VAR} — braced variable used as redirect source."""
+        assert blocked("wc -l < ${INPUT}")
+
+    def test_plain_pipe_safe(self):
+        """Plain pipe without variable expansion is fine."""
+        assert safe("ls -la | sort")
+
+    def test_plain_redirect_safe(self):
+        """File-literal redirect is fine."""
+        assert safe("cat < /etc/hostname")
+
+    # 21. /proc/*/environ access
+    def test_proc_pid_environ_blocked(self):
+        """/proc/<pid>/environ must be blocked."""
+        assert blocked("cat /proc/1234/environ")
+
+    def test_proc_self_environ_blocked(self):
+        """/proc/self/environ must be blocked."""
+        assert blocked("strings /proc/self/environ")
+
+    def test_proc_wildcard_environ_blocked(self):
+        """/proc/*/environ glob must be blocked."""
+        assert blocked("cat /proc/*/environ | grep SECRET")
+
+    def test_proc_other_file_safe(self):
+        """/proc paths other than environ are not blocked by this rule."""
+        assert safe("cat /proc/cpuinfo")
+
+    # 22. Carriage return (CR) injection
+    def test_cr_literal_blocked(self):
+        """Literal \\r character in command must be blocked."""
+        assert blocked("echo hello\recho evil")
+
+    def test_cr_escaped_blocked(self):
+        """The two-character sequence \\r (backslash + r) must also be blocked."""
+        assert blocked(r"printf 'hello\rworld'")
+
+    def test_normal_command_no_cr_safe(self):
+        """Commands without CR must not be blocked."""
+        assert safe("echo hello")
+
+    # 23. Quote-comment desynchronization
+    def test_quote_comment_single_blocked(self):
+        """Single-quoted string containing # followed by closing quote."""
+        assert blocked("cmd '# comment' arg")
+
+    def test_quote_comment_double_blocked(self):
+        """Double-quoted string containing # followed by closing quote."""
+        assert blocked('cmd "# injected" arg')
+
+    def test_plain_comment_at_end_safe(self):
+        """A bare # comment at the end of a command is normal shell syntax."""
+        assert safe("ls -la # list files")
+
+    def test_hash_in_quoted_string_no_close_safe(self):
+        """A hash at end of single-quoted string with no trailing quote triggers rule.
+        Conversely, a safe pattern with no surrounding quotes must pass."""
+        assert safe("echo hello")
+
+    # 24. Brace expansion imbalance (depth tracking)
+    def test_brace_imbalance_blocked(self):
+        """More closing braces than opening braces (outside quotes) is suspicious."""
+        # The attack pattern from CC: git diff {@'{'0},--output=/tmp/pwned}
+        # Unquoted: { and } → but the '{' inside '...' is quoted, so unquoted tally
+        # is 0 opens, 2 closes → blocked.
+        assert blocked("git diff {@'{'0},--output=/tmp/pwned}")
+
+    def test_brace_imbalance_simple_blocked(self):
+        """Simple extra closing brace must be blocked."""
+        assert blocked("echo foo}")
+
+    def test_balanced_braces_safe(self):
+        """Balanced brace expansion must not be blocked."""
+        assert safe("echo {a,b,c}")
+
+    def test_balanced_quoted_braces_safe(self):
+        """Quoted braces that balance each other are fine."""
+        assert safe("echo '{}'")
+
+    def test_no_braces_safe(self):
+        """Commands with no braces must not be blocked."""
+        assert safe("ls -la")
+
+
 # ── Safe-command allow-list — regression guard ────────────────────────────────
 
 class TestSafeCommands:

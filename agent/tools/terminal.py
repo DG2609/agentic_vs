@@ -6,6 +6,7 @@ When config.SANDBOX_ENABLED=True and Docker is available, commands run inside
 an isolated container (network isolation, memory/CPU limits, no privilege escalation).
 Falls back to direct execution if Docker is unavailable.
 """
+import os
 import re
 import subprocess
 from langchain_core.tools import tool
@@ -13,6 +14,25 @@ import config
 from agent.tools.truncation import truncate_output
 from agent.tools.utils import resolve_path_safe
 from models.tool_schemas import TerminalExecArgs
+
+
+# ── Binary-hijacking env var scrub ───────────────────────────
+# These vars can redirect shared-library / interpreter loading and allow
+# an attacker to intercept any subprocess we spawn.
+
+_HIJACK_ENV_VARS = {
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH", "PYTHONPATH", "RUBYOPT", "NODE_OPTIONS",
+    "PERL5LIB", "PERLLIB",
+}
+
+
+def _safe_env() -> dict:
+    """Return os.environ copy with binary-hijacking vars removed."""
+    env = os.environ.copy()
+    for var in _HIJACK_ENV_VARS:
+        env.pop(var, None)
+    return env
 
 
 def _validate_command(command: str) -> str | None:
@@ -139,6 +159,69 @@ def _validate_command(command: str) -> str | None:
         if re.search(r'\bcd\b.+(?:;|&&|\|\|).+\bgit\b|\bgit\b.+(?:;|&&|\|\|).+\bcd\b', command):
             return _blocked("compound cd+git command — may bypass bare repository security checks")
 
+    # ── CC-sourced advanced validators ───────────────────────────────────────────
+    # Ported from Claude Code's bashSecurity.ts (validateObfuscatedFlags and friends).
+
+    # 19. ANSI-C quoting — $'...' or $"..." decodes escape sequences at shell parse
+    #     time; e.g. $'\x72\x6d' decodes to 'rm', hiding dangerous strings from
+    #     simple text scanners.
+    if re.search(r"\$'[^']*'|\$\"[^\"]*\"", command):
+        return _blocked("ANSI-C quoting ($'...' or $\"...\") detected — may obfuscate dangerous characters")
+
+    # 20. Variable expansion used as pipe source or redirect target — $VAR | cmd or
+    #     cmd < $VAR.  The variable could expand to a sensitive/unexpected path.
+    if re.search(r'\$\{?\w+\}?\s*\|', command) or re.search(r'<\s*\$\{?\w+\}?', command):
+        return _blocked("variable expansion in pipe or redirect ($VAR | cmd) — may expand to unexpected path")
+
+    # 21. /proc/*/environ access — process environment files may contain secrets
+    #     (tokens, passwords, API keys) readable by the process owner.
+    if re.search(r'/proc/[0-9a-z_*]+/environ', command):
+        return _blocked("/proc/*/environ access blocked — environment files may contain secrets")
+
+    # 22. Carriage return (CR) injection — a \r in the command string can cause the
+    #     terminal display to show one command while the shell executes a different
+    #     (hidden) one, enabling display/execution desynchronization.
+    if '\r' in command or '\\r' in command:
+        return _blocked("carriage return (\\r) detected — may cause shell/display desynchronization")
+
+    # 23. Quote-comment desynchronization — a # character inside a quoted string
+    #     followed by closing quote can confuse naïve parsers into thinking a comment
+    #     ends the logical line earlier than the shell does.
+    if re.search(r"""['"]\s*#\s*[^'"]*['"]""", command):
+        return _blocked("quote-comment desynchronization detected — # inside quotes may cause parser confusion")
+
+    # 24. Brace expansion depth tracking (CC: validateBraceExpansion).
+    #     Attack vector: git diff {@'{'0},--output=/tmp/pwned}
+    #     A quoted '{' hides an extra OPEN brace; after stripping quotes the shell
+    #     sees more CLOSE braces than OPEN braces, enabling path injection.
+    def _count_unquoted_braces(cmd: str) -> tuple[int, int]:
+        """Count unquoted { and } in a command string (respects single/double quotes)."""
+        opens = closes = 0
+        in_single = in_double = False
+        i = 0
+        while i < len(cmd):
+            c = cmd[i]
+            if c == "'" and not in_double:
+                in_single = not in_single
+            elif c == '"' and not in_single:
+                in_double = not in_double
+            elif c == '\\' and (in_single or in_double):
+                i += 1  # skip escaped char
+            elif not in_single and not in_double:
+                if c == '{':
+                    opens += 1
+                elif c == '}':
+                    closes += 1
+            i += 1
+        return opens, closes
+
+    opens, closes = _count_unquoted_braces(command)
+    if closes > opens:
+        return _blocked(
+            f"brace expansion imbalance ({opens} opens, {closes} closes) — "
+            "may exploit quote-stripping to inject file paths"
+        )
+
     return None  # command passed all checks
 
 
@@ -190,6 +273,7 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
             stderr=subprocess.PIPE,
             encoding="utf-8",
             errors="replace",
+            env=_safe_env(),
         )
         try:
             stdout, stderr = proc.communicate(timeout=max_timeout)
