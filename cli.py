@@ -9,7 +9,7 @@ import logging
 import datetime
 from pathlib import Path
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.live import Live
 from rich.panel import Panel
@@ -56,6 +56,16 @@ class JSONLineHandler(logging.Handler):
                 f.write(json.dumps(log_entry) + "\n")
         except Exception:
             pass
+
+
+def _preprocess_markdown(text: str) -> str:
+    """Prevent ~N~ from rendering as strikethrough.
+
+    Models write ``~100~`` as an approximation marker, not as a strikethrough
+    intent.  Single tildes around a number are stripped; double-tilde
+    ``~~text~~`` emphasis is left untouched.
+    """
+    return re.sub(r'(?<!~)~(\d+(?:\.\d+)?)~(?!~)', r'\1', text)
 
 
 def _setup_json_logging(thread_id: str) -> None:
@@ -233,6 +243,63 @@ def _should_flush() -> bool:
     return False
 
 
+# ── Markdown streaming split ─────────────────────────────────
+
+def _split_stable_markdown(text: str) -> tuple:
+    """Split text into (stable_part, unstable_tail).
+
+    Stable = everything up to and including the last complete top-level block.
+    A top-level block ends at a blank line or at certain tokens (```, #, ---).
+    The unstable tail is the current incomplete block being streamed.
+
+    Returns (stable, unstable) where stable can be rendered safely.
+    """
+    # Find the last double-newline (block separator)
+    last_break = text.rfind('\n\n')
+    if last_break == -1:
+        return "", text  # No complete block yet
+
+    stable = text[:last_break + 2]
+    unstable = text[last_break + 2:]
+
+    # Don't split inside a code fence
+    if stable.count('```') % 2 != 0:
+        # Odd number of backtick fences = we're inside a fence, don't split here
+        prev_break = text[:last_break].rfind('\n\n')
+        if prev_break == -1:
+            return "", text
+        stable = text[:prev_break + 2]
+        unstable = text[prev_break + 2:]
+
+    return stable, unstable
+
+
+# ── Synchronized output (DEC 2026 BSU/ESU) ──────────────────
+
+_BSU = "\033[?2026h"  # Begin Synchronized Update
+_ESU = "\033[?2026l"  # End Synchronized Update
+
+
+def _supports_synchronized_output() -> bool:
+    """Check if terminal supports DEC 2026 synchronized output (BSU/ESU)."""
+    term = os.environ.get("TERM", "")
+    term_program = os.environ.get("TERM_PROGRAM", "")
+    # Supported: iTerm2, Ghostty, WezTerm, kitty — NOT tmux (it chunks)
+    if "tmux" in os.environ.get("TMUX", ""):
+        return False
+    return term_program in ("iTerm.app", "ghostty", "WezTerm", "kitty") or "kitty" in term
+
+
+def _sync_print(content: str) -> None:
+    """Print with synchronized output to prevent flicker."""
+    if _supports_synchronized_output():
+        sys.stdout.write(_BSU + content + _ESU)
+        sys.stdout.flush()
+    else:
+        sys.stdout.write(content)
+        sys.stdout.flush()
+
+
 # ── Bottom Toolbar ──────────────────────────────────────────
 def bottom_toolbar():
     mode = current_agent_mode.upper()
@@ -275,6 +342,7 @@ async def chat_loop(resume_id: str = None):
     global current_agent_mode
     session = PromptSession(style=style, bottom_toolbar=bottom_toolbar, key_bindings=bindings)
     thread_id = resume_id if resume_id else str(uuid.uuid4())
+    _last_interrupt: float = 0.0  # track double Ctrl+C
 
     # Session cost/usage tracking
     _session_stats = {"turns": 0, "tokens": 0, "cost": 0.0}
@@ -410,9 +478,18 @@ async def chat_loop(resume_id: str = None):
             if LIFECYCLE_HOOKS:
                 await run_lifecycle_hook("stop", {"thread_id": thread_id})
             
-        except (KeyboardInterrupt, EOFError):
+        except EOFError:
             console.print("\n[yellow]Goodbye! ShadowDev powering down...[/yellow]")
             break
+        except KeyboardInterrupt:
+            now = time.time()
+            if now - _last_interrupt < 1.5:
+                # Second Ctrl+C within 1.5s → exit
+                console.print("\n[yellow]Goodbye! ShadowDev powering down...[/yellow]")
+                break
+            _last_interrupt = now
+            console.print("[dim]Interrupted. Press Ctrl+C again to exit.[/dim]")
+            continue
 
     # ── Lifecycle: session_end ───────────────────────────────
     if LIFECYCLE_HOOKS:
@@ -481,7 +558,20 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                         stripped = clean.strip()
                         if stripped in ["{", "}", "{}", "{\n}", "{\n  \n}"]:
                             clean = ""
-                        live_display.update(Markdown(clean.strip()))
+                        # Split at block boundary: render stable part as Markdown,
+                        # unstable tail as plain text to avoid incomplete syntax flicker.
+                        stable, unstable = _split_stable_markdown(clean.strip())
+                        if stable:
+                            display = Group(Markdown(_preprocess_markdown(stable)), Text(unstable))
+                        else:
+                            display = Markdown(_preprocess_markdown(clean.strip()))
+                        if _supports_synchronized_output():
+                            sys.stdout.write(_BSU)
+                            sys.stdout.flush()
+                        live_display.update(display)
+                        if _supports_synchronized_output():
+                            sys.stdout.write(_ESU)
+                            sys.stdout.flush()
 
             # ── Tool START ──────────────────────────────────
             elif kind == "on_tool_start":
@@ -506,10 +596,10 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                         except Exception:
                             pass
                     if msg and str(msg).strip() and run_id not in printed_replies:
-                        console.print(Markdown(str(msg)))
+                        console.print(Markdown(_preprocess_markdown(str(msg))))
                         printed_replies.add(run_id)
                     continue
-                
+
                 icon, title = _tool_display(tool_name, args if isinstance(args, dict) else {})
                 
                 status = Status(
@@ -550,10 +640,10 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                         except Exception:
                             pass
                     if msg and str(msg).strip():
-                        console.print(Markdown(str(msg)))
+                        console.print(Markdown(_preprocess_markdown(str(msg))))
                         printed_replies.add(run_id)
                     continue
-                
+
                 # Stop spinner
                 tool_info = active_tools.pop(run_id, None)
                 if tool_info:

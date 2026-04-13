@@ -13,6 +13,11 @@ Major features:
 - Responsive layout
 - Theme support (dark/light)
 - Better streaming (progressive markdown)
+- Paste detection (suppresses Enter mid-paste)
+- Double-press Ctrl+C (first press cancels, second exits)
+- Strikethrough fix (~N~ not rendered as struck text)
+- Thinking indicator (∴ Thinking…) with Ctrl+O toggle
+- Tree-structured agent/tool progress in sidebar
 """
 
 import sys
@@ -167,6 +172,38 @@ def _get_workspace() -> str:
     return os.path.basename(os.path.abspath(config.WORKSPACE_DIR))
 
 
+# ── Markdown pre-processing ────────────────────────────────
+
+def _preprocess_markdown(text: str) -> str:
+    """Prevent ~N~ from rendering as strikethrough.
+
+    Models write ``~100~`` as an approximation marker, not as a strikethrough
+    intent.  Single tildes around a number are stripped to the bare number;
+    double-tilde ``~~text~~`` emphasis is left untouched (that *is* intentional
+    strikethrough).
+    """
+    # Only collapse single-tilde numeric spans, e.g. ~100~ or ~3.14~
+    return re.sub(r'(?<!~)~(\d+(?:\.\d+)?)~(?!~)', r'\1', text)
+
+
+# ── Tool tree formatter ────────────────────────────────────
+
+def _format_tool_tree(active_tools: dict) -> str:
+    """Format active tool dict as an ASCII tree string."""
+    if not active_tools:
+        return ""
+    lines: list[str] = []
+    items = list(active_tools.items())
+    for i, (run_id, tool_info) in enumerate(items):
+        is_last = i == len(items) - 1
+        prefix = "└─" if is_last else "├─"
+        done = tool_info.get("done", False)
+        status = "✓" if done else "⟳"
+        name = tool_info.get("tool_name", "?")
+        lines.append(f"{prefix} {status} {name}")
+    return "\n".join(lines)
+
+
 # ── Command Palette Screen ─────────────────────────────────
 
 COMMANDS = [
@@ -296,12 +333,36 @@ class WelcomeView(Static):
 class StatusBar(Static):
     """Bottom-docked status line with model, agent, tokens, session."""
 
+    _DEBOUNCE_MS = 200  # max 5 fps for token/cost updates
+
     agent = reactive("planner")
     tokens = reactive(0)
     turns = reactive(0)
     cost = reactive(0.0)
     busy = reactive(False)
+    busy_label = reactive("working...")
     session_id = reactive("")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pending_update = None
+
+    def schedule_update(self, tokens: int, cost: float) -> None:
+        """Debounce token/cost status bar updates to max 5 fps."""
+        if self._pending_update is not None:
+            self._pending_update.cancel()
+        self._pending_update = self.call_later(
+            self._DEBOUNCE_MS / 1000,
+            self._do_update,
+            tokens,
+            cost,
+        )
+
+    def _do_update(self, tokens: int, cost: float) -> None:
+        """Apply the debounced token/cost update."""
+        self._pending_update = None
+        self.tokens = tokens
+        self.cost = cost
 
     def render(self) -> Text:
         t = Text()
@@ -316,9 +377,9 @@ class StatusBar(Static):
         t.append(f"{config.LLM_PROVIDER.upper()}", style="bold")
         t.append("/", style="dim")
         t.append(f"{_get_model_name()} ", style="bold green")
-        # Status
+        # Status — compact "∴ Thinking…" or standard "working..."
         if self.busy:
-            t.append(" working... ", style="bold yellow")
+            t.append(f" {self.busy_label} ", style="bold yellow")
         # Tokens
         if self.tokens > 0:
             t.append(f" {self.tokens:,} tokens", style="dim")
@@ -407,6 +468,14 @@ class ToolSidebar(Vertical):
                 return
         tree.root.add_leaf(short)
 
+    def refresh_tool_tree(self, active_tools: dict) -> None:
+        """Render active tools as a tree in the activity log."""
+        tree_str = _format_tool_tree(active_tools)
+        if not tree_str:
+            return
+        log = self.query_one("#tool-log", RichLog)
+        log.write(Text(tree_str, style="cyan"))
+
     def refresh_workers(self) -> None:
         """Show last 5 workers from the coordinator pool (coordinator mode only)."""
         if not config.COORDINATOR_MODE:
@@ -437,7 +506,13 @@ class ToolSidebar(Vertical):
 # ── Chat Input Widget ──────────────────────────────────────
 
 class ChatInput(Vertical):
-    """Multi-line input area with submit button."""
+    """Multi-line input area with submit button.
+
+    Paste detection: tracks whether the user is currently pasting text (burst
+    of characters in quick succession).  During an active paste the Enter key
+    is suppressed so a multi-line paste lands in the textarea rather than
+    submitting mid-paste.
+    """
 
     CSS = """
     ChatInput {
@@ -459,6 +534,10 @@ class ChatInput(Vertical):
     }
     """
 
+    # ── paste-detection state ──────────────────────────────
+    _is_pasting: bool = False
+    _paste_reset_timer: Timer | None = None
+
     class Submitted(Message):
         def __init__(self, value: str) -> None:
             super().__init__()
@@ -479,8 +558,24 @@ class ChatInput(Vertical):
         ta.soft_wrap = True
         ta.focus()
 
+    # Textual fires Paste events when the terminal's bracketed-paste sequence
+    # is detected.  We use this as the authoritative paste signal.
+    def on_paste(self, event) -> None:
+        """Mark paste-in-progress; schedule auto-reset after 150ms."""
+        self._is_pasting = True
+        if self._paste_reset_timer is not None:
+            self._paste_reset_timer.stop()
+        self._paste_reset_timer = self.set_timer(0.15, self._end_paste)
+
+    def _end_paste(self) -> None:
+        self._is_pasting = False
+        self._paste_reset_timer = None
+
     def on_key(self, event) -> None:
         if event.key == "enter" and not event.shift:
+            # Suppress submission while a paste is still arriving
+            if self._is_pasting:
+                return
             event.prevent_default()
             event.stop()
             ta = self.query_one("#chat-input-area", TextArea)
@@ -540,13 +635,22 @@ class ShadowDevTUI(App):
         Binding("ctrl+q", "quit_app", "Quit", key_display="Ctrl+Q"),
         Binding("ctrl+l", "clear_chat", "Clear", key_display="Ctrl+L"),
         Binding("ctrl+n", "new_session", "New Session", key_display="Ctrl+N"),
-        Binding("ctrl+c", "cancel_agent", "Cancel", key_display="Ctrl+C", show=False),
+        Binding("ctrl+c", "interrupt", "Cancel/Exit", key_display="Ctrl+C", show=False),
         Binding("escape", "cancel_agent", "Cancel", show=False),
+        Binding("ctrl+o", "toggle_thinking", "Thinking", key_display="Ctrl+O", show=False),
     ]
 
     current_agent = reactive("planner")
     is_running = reactive(False)
     has_messages = reactive(False)
+
+    # ── double-press Ctrl+C state ──────────────────────────
+    _last_ctrl_c: float = 0.0
+    _DOUBLE_PRESS_TIMEOUT: float = 1.5  # seconds
+
+    # ── thinking-indicator state ───────────────────────────
+    _thinking_compact: bool = False   # False = show full; True = show compact "∴"
+    _agent_status: str = "idle"       # "idle" | "thinking" | "running"
 
     def __init__(self):
         super().__init__()
@@ -722,6 +826,10 @@ class ShadowDevTUI(App):
         self.total_turns += 1
         sb.turns = self.total_turns
 
+        # Mark agent as "thinking" (no tool/response yet)
+        self._agent_status = "thinking"
+        sb.busy_label = "∴ Thinking…" if self._thinking_compact else "working..."
+
         try:
             async for event in self.graph.astream_events(
                 input_state, config=graph_config, version="v2"
@@ -754,6 +862,12 @@ class ShadowDevTUI(App):
 
                 # Streaming text
                 if kind == "on_chat_model_stream":
+                    # Transition: first token means we moved from "thinking" to
+                    # actively streaming a response.
+                    if self._agent_status == "thinking":
+                        self._agent_status = "running"
+                        sb.busy_label = "working..."
+
                     chunk = data.get("chunk")
                     if chunk and hasattr(chunk, "content") and chunk.content:
                         content = chunk.content
@@ -773,10 +887,27 @@ class ShadowDevTUI(App):
                             buffer = parts[1] if len(parts) > 1 else ""
                             clean = self._clean_buffer(to_render)
                             if clean:
-                                chat.write(Markdown(clean))
+                                chat.write(Markdown(_preprocess_markdown(clean)))
+
+                # Token/cost tracking — debounced via schedule_update (max 5 fps)
+                elif kind == "on_chat_model_end":
+                    chunk = data.get("output")
+                    if chunk is not None:
+                        um = getattr(chunk, "usage_metadata", None)
+                        if um and isinstance(um, dict):
+                            total = (um.get("input_tokens", 0) or 0) + (um.get("output_tokens", 0) or 0)
+                            if total > 0:
+                                self.total_tokens += total
+                        # Debounce the status bar update (max 5 fps)
+                        sb.schedule_update(self.total_tokens, self.total_cost)
 
                 # Tool START
                 elif kind == "on_tool_start":
+                    # A tool launch means we are no longer in "thinking" state
+                    if self._agent_status == "thinking":
+                        self._agent_status = "running"
+                        sb.busy_label = "working..."
+
                     tool_name = event.get("name", "unknown")
                     run_id = event.get("run_id", str(uuid.uuid4()))
                     args = data.get("input", {})
@@ -801,7 +932,10 @@ class ShadowDevTUI(App):
                             "start": time.time(),
                             "tool_name": tool_name,
                             "args": args if isinstance(args, dict) else {},
+                            "done": False,
                         }
+                    # Refresh the tree view in the sidebar
+                    sidebar.refresh_tool_tree(self.active_tools)
 
                 # Tool END
                 elif kind == "on_tool_end":
@@ -825,6 +959,9 @@ class ShadowDevTUI(App):
                         continue
 
                     async with self._state_lock:
+                        # Mark done before popping so tree renders ✓ briefly
+                        if run_id in self.active_tools:
+                            self.active_tools[run_id]["done"] = True
                         tool_info = self.active_tools.pop(run_id, None)
                     elapsed = time.time() - tool_info["start"] if tool_info else 0
                     elapsed_str = _fmt_elapsed(elapsed)
@@ -832,6 +969,8 @@ class ShadowDevTUI(App):
                     label = _tool_label(tool_name, a)
 
                     sidebar.log_tool_end(label, elapsed_str)
+                    # Refresh tree after tool completes
+                    sidebar.refresh_tool_tree(self.active_tools)
 
                     # Track modified files
                     if tool_name in ("file_edit", "file_write", "file_edit_batch"):
@@ -875,7 +1014,7 @@ class ShadowDevTUI(App):
             if buffer.strip():
                 clean = self._clean_buffer(buffer)
                 if clean:
-                    chat.write(Markdown(clean))
+                    chat.write(Markdown(_preprocess_markdown(clean)))
 
             self.notify("Task complete", severity="information")
 
@@ -895,8 +1034,12 @@ class ShadowDevTUI(App):
         finally:
             async with self._state_lock:
                 self.active_tools.clear()
+            self._agent_status = "idle"
             self.is_running = False
             sb.busy = False
+            sb.busy_label = "working..."  # reset for next run
+            # Clear tree when agent finishes
+            sidebar.refresh_tool_tree({})
             ci = self.query_one("#chat-input", ChatInput)
             ci.enable()
             chat.write(Text(""))
@@ -1007,11 +1150,50 @@ class ShadowDevTUI(App):
 
         self.notify(f"New session: {self.thread_id[:8]}...")
 
+    def action_interrupt(self) -> None:
+        """Double-press Ctrl+C handler.
+
+        First press: cancel the running agent (or show hint if idle).
+        Second press within ``_DOUBLE_PRESS_TIMEOUT`` seconds: exit the app.
+        """
+        now = time.time()
+        if now - self._last_ctrl_c < self._DOUBLE_PRESS_TIMEOUT:
+            # Second press — exit
+            self.exit()
+            return
+        # First press
+        self._last_ctrl_c = now
+        if self.is_running:
+            self._abort_event.set()
+            self.notify("Cancelling… Press Ctrl+C again to exit", timeout=1.5, severity="warning")
+        else:
+            self.notify("Press Ctrl+C again to exit", timeout=1.5)
+
     def action_cancel_agent(self) -> None:
-        """Cancel the running agent (Ctrl+C / Escape)."""
+        """Cancel the running agent (Escape)."""
         if self.is_running:
             self._abort_event.set()
             self.notify("Cancelling...", severity="warning")
+
+    def action_toggle_thinking(self) -> None:
+        """Ctrl+O — toggle between full thinking content and compact indicator."""
+        self._thinking_compact = not self._thinking_compact
+        label = "compact" if self._thinking_compact else "full"
+        self.notify(f"Thinking display: {label}", timeout=1.5)
+        # If the agent is currently thinking, refresh the status bar immediately
+        if self._agent_status == "thinking":
+            self._update_thinking_indicator()
+
+    def _update_thinking_indicator(self) -> None:
+        """Update the status bar thinking display based on current mode."""
+        try:
+            sb = self.query_one("#status-bar", StatusBar)
+            if self._thinking_compact:
+                sb.busy_label = "∴ Thinking…"
+            else:
+                sb.busy_label = "working..."
+        except Exception:
+            pass
 
     async def action_quit_app(self) -> None:
         if LIFECYCLE_HOOKS:
