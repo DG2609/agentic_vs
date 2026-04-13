@@ -224,6 +224,37 @@ def get_llm(tools: list):
 
 
 # ─────────────────────────────────────────────────────────────
+# Reactive compaction — context overflow error detection
+# ─────────────────────────────────────────────────────────────
+
+_CONTEXT_OVERFLOW_ERRORS = (
+    "context_length_exceeded",
+    "prompt_too_long",
+    "maximum context length",
+    "context window",
+    "too many tokens",
+    "token limit",
+)
+
+
+class ContextOverflowError(Exception):
+    """Raised when the LLM API rejects a request due to context window overflow.
+
+    Caught in agent_node to trigger reactive compaction rather than surfacing
+    the raw API error to the user (mirrors CC's reactive compact pattern).
+    """
+    def __init__(self, original: Exception):
+        super().__init__(str(original))
+        self.original = original
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    """Return True if *exc* indicates a context-window overflow error."""
+    msg = str(exc).lower()
+    return any(pattern in msg for pattern in _CONTEXT_OVERFLOW_ERRORS)
+
+
+# ─────────────────────────────────────────────────────────────
 # Retry wrapper for LLM invocation
 # ─────────────────────────────────────────────────────────────
 _RETRY_BASE_MS = 500          # 500 ms starting delay (matches CC BASE_DELAY_MS)
@@ -249,6 +280,11 @@ async def _invoke_with_retry(llm, messages: list, max_retries: int = _RETRY_MAX_
             return await llm.ainvoke(messages)
         except Exception as e:
             err_msg = str(e).lower()
+
+            # Context overflow is non-retryable at this level — bubble up so
+            # agent_node can compact and retry the full turn instead.
+            if _is_context_overflow(e):
+                raise ContextOverflowError(e) from e
 
             is_529 = "529" in err_msg or "overloaded" in err_msg
             is_retryable = is_529 or any(k in err_msg for k in [
@@ -460,6 +496,30 @@ def _build_recovery_message(loop_type: str, messages: list) -> str:
         )
 
 
+def _is_diminishing(state: "AgentState") -> bool:
+    """Return True if agent is making diminishing progress (CC: isDiminishing).
+
+    Triggers when:
+    - 3+ consecutive continuation turns
+    - Last 2 LLM response token deltas are both < 500 tokens
+    """
+    turns = state.get("session_turns", 0) if hasattr(state, "get") else getattr(state, "session_turns", 0)
+    if turns < 3:
+        return False
+
+    messages = state.get("messages", []) if hasattr(state, "get") else list(getattr(state, "messages", []))
+    # Collect AI messages that are not tool responses (proxy for agent response turns)
+    ai_messages = [
+        m for m in messages[-10:]
+        if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)
+    ]
+    if len(ai_messages) < 2:
+        return False
+
+    recent_sizes = [_msg_tokens(m) for m in ai_messages[-2:]]
+    return all(size < 500 for size in recent_sizes)
+
+
 # ─────────────────────────────────────────────────────────────
 # Overflow detection
 # ─────────────────────────────────────────────────────────────
@@ -544,32 +604,71 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
         recovery_msg = _build_recovery_message(loop_type, messages)
         return {"messages": [AIMessage(content=recovery_msg)]}
 
+    # Diminishing-returns check (CC: isDiminishing) — stop if 3+ turns of tiny responses
+    if _is_diminishing(state):
+        logger.warning("[doom-loop] isDiminishing: 3+ turns with < 500-token responses — injecting recovery")
+        recovery = (
+            "I notice I've been making very little progress over the last few turns. "
+            "Let me pause, reassess the goal, and take a more decisive next step."
+        )
+        return {
+            "messages": [AIMessage(content=recovery)],
+            "diminishing_halt": True,
+        }
+
+    # ── System prompt assembly (cache-ordering: stable → semi-stable → dynamic) ──
+    #
+    # Prompt caching (e.g. Anthropic prompt caching) benefits from a STABLE prefix
+    # that doesn't change between turns/retries.  We therefore build system_content
+    # in ascending order of volatility:
+    #
+    #   1. BASE_SYSTEM_PROMPT / PLANNER_PROMPT / CODER_PROMPT
+    #      Fully static — never changes within a session. Best cache candidate.
+    #
+    #   2. Coordinator system prompt (static per session if mode doesn't change)
+    #
+    #   3. Project rules (AGENTS.md / CLAUDE.md / .shadowdev/rules/*.md)
+    #      Changes only when the user edits those files — essentially static within
+    #      a session. Small cache invalidation surface.
+    #
+    #   4. Model-aware edit instructions
+    #      Static per model; changes only if the user switches provider mid-session.
+    #
+    #   5. Previous conversation summary — changes each compaction cycle (semi-stable)
+    #
+    #   6. Current workspace path — static per session
+    #
+    # Dynamic context (git status, current time, per-turn state) must NOT be prepended
+    # before the stable base; appending it last keeps the cache-stable prefix intact.
+    #
     # Build system message & pick LLM
     if state.active_agent == "planner":
-        system_content = PLANNER_PROMPT
+        system_content = PLANNER_PROMPT  # 1. Stable base
         llm = llm_planner
     else:
-        system_content = CODER_PROMPT
+        system_content = CODER_PROMPT    # 1. Stable base
         llm = llm_coder
 
     # Coordinator mode overrides both prompt and LLM binding
     if getattr(state, 'coordinator_mode', False) or is_coordinator_mode():
-        system_content = get_coordinator_system_prompt()
+        system_content = get_coordinator_system_prompt()  # 2. Still stable per session
         llm = llm_planner  # coordinator delegates writes to workers, never does them directly
 
-    # Inject project rules (hierarchical: global → project → local → rules/)
+    # 3. Project rules (hierarchical: global → project → local → rules/)
     rules = load_project_rules(workspace=state.workspace or config.WORKSPACE_DIR)
     if rules:
         system_content += f"\n\n---\n## Project Rules\n{rules}"
 
-    # Inject model-aware edit instructions
+    # 4. Model-aware edit instructions (static per provider/model)
     from agent.model_aware import get_edit_instruction
     edit_instr = get_edit_instruction()
     if edit_instr:
         system_content += edit_instr
 
+    # 5. Previous conversation summary (semi-stable: changes only after compaction)
     if state.summary:
         system_content += f"\n\n## Previous Conversation Summary\n{state.summary}"
+    # 6. Current workspace path (static per session)
     if state.workspace:
         system_content += f"\n\n## Current Workspace\n{state.workspace}"
 
@@ -584,7 +683,26 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     else:
         full_messages = [SystemMessage(content=system_content)] + _prune_tool_outputs(messages)
 
-    response = await _invoke_with_retry(llm, full_messages)
+    try:
+        response = await _invoke_with_retry(llm, full_messages)
+    except ContextOverflowError as overflow_exc:
+        # ── Reactive compaction (CC pattern) ─────────────────────────
+        # If we've already tried compacting this turn, surface the error.
+        if state.get("reactive_compact_attempted", False) if hasattr(state, "get") else getattr(state, "reactive_compact_attempted", False):
+            logger.error("[reactive compact] overflow persists after compaction — surfacing error")
+            raise overflow_exc.original from overflow_exc
+
+        logger.warning("[reactive compact] context overflow detected, triggering compaction")
+        compacted = await summarize_node(state)
+        # Build a temporary merged state-like object so we can retry
+        # We re-enter agent_node with the compacted messages by returning a
+        # special marker; the graph will route back through agent_node.
+        # To avoid infinite recursion we set reactive_compact_attempted=True.
+        compacted["reactive_compact_attempted"] = True
+        # Surface the compaction result now; LangGraph will call agent_node again
+        # on the next step with the compacted messages, continuing transparently.
+        return compacted
+
     response = _repair_tool_calls(response)
 
     active_agent = state.active_agent
@@ -627,6 +745,8 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
         "session_turns": new_turns,
         "total_tokens_used": new_tokens,
         "session_cost": new_cost,
+        # Clear reactive compaction flag after a successful LLM call
+        "reactive_compact_attempted": False,
     }
 
     # Clear injected notifications to prevent replay on the next turn
