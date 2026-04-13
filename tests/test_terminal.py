@@ -368,6 +368,83 @@ class TestCCAdvancedValidators:
         assert safe("ls -la")
 
 
+# ── LD_PRELOAD / env scrub ────────────────────────────────────────────────────
+
+class TestEnvScrub:
+    """_safe_env() must strip binary-hijacking vars from the subprocess environment."""
+
+    def test_ld_preload_scrubbed(self):
+        """LD_PRELOAD must not appear in the env returned by _safe_env()."""
+        import os
+        from agent.tools.terminal import _safe_env, _HIJACK_ENV_VARS
+
+        # Temporarily inject LD_PRELOAD into the current process env
+        os.environ["LD_PRELOAD"] = "/tmp/evil.so"
+        try:
+            env = _safe_env()
+            assert "LD_PRELOAD" not in env, "LD_PRELOAD should have been scrubbed"
+        finally:
+            os.environ.pop("LD_PRELOAD", None)
+
+    def test_ld_library_path_scrubbed(self):
+        import os
+        from agent.tools.terminal import _safe_env
+
+        os.environ["LD_LIBRARY_PATH"] = "/tmp/evil"
+        try:
+            env = _safe_env()
+            assert "LD_LIBRARY_PATH" not in env
+        finally:
+            os.environ.pop("LD_LIBRARY_PATH", None)
+
+    def test_pythonpath_scrubbed(self):
+        import os
+        from agent.tools.terminal import _safe_env
+
+        os.environ["PYTHONPATH"] = "/tmp/evil"
+        try:
+            env = _safe_env()
+            assert "PYTHONPATH" not in env
+        finally:
+            os.environ.pop("PYTHONPATH", None)
+
+    def test_node_options_scrubbed(self):
+        import os
+        from agent.tools.terminal import _safe_env
+
+        os.environ["NODE_OPTIONS"] = "--require /tmp/evil"
+        try:
+            env = _safe_env()
+            assert "NODE_OPTIONS" not in env
+        finally:
+            os.environ.pop("NODE_OPTIONS", None)
+
+    def test_safe_env_keeps_path(self):
+        """_safe_env() must not strip legitimate vars like PATH."""
+        from agent.tools.terminal import _safe_env
+        env = _safe_env()
+        # PATH should be present (it's in os.environ on all platforms)
+        import os
+        if "PATH" in os.environ:
+            assert "PATH" in env
+
+    def test_all_hijack_vars_scrubbed(self):
+        """Every var in _HIJACK_ENV_VARS must be absent from _safe_env() output when set."""
+        import os
+        from agent.tools.terminal import _safe_env, _HIJACK_ENV_VARS
+
+        for var in _HIJACK_ENV_VARS:
+            os.environ[var] = "/tmp/evil"
+
+        try:
+            env = _safe_env()
+            for var in _HIJACK_ENV_VARS:
+                assert var not in env, f"{var} was not scrubbed by _safe_env()"
+        finally:
+            for var in _HIJACK_ENV_VARS:
+                os.environ.pop(var, None)
+
+
 # ── Safe-command allow-list — regression guard ────────────────────────────────
 
 class TestSafeCommands:

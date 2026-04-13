@@ -10,6 +10,7 @@ Edit upgraded with multi-strategy matching inspired by OpenCode:
 All outputs go through truncation layer.
 """
 import os
+import re
 import glob
 import difflib
 import pathlib
@@ -98,6 +99,51 @@ def _is_git_internal_write(resolved_path: str) -> bool:
     return False
 
 
+# ── Sensitive dotfile protection (CC parity) ─────────────────
+
+_DANGEROUS_FILES = frozenset({
+    ".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc",
+    ".zprofile", ".profile", ".bash_logout", ".zlogout",
+    ".ripgreprc", ".mcp.json", ".npmrc", ".pip/pip.conf",
+    ".ssh/config", ".ssh/authorized_keys", ".ssh/known_hosts",
+})
+
+_DANGEROUS_DIRS = frozenset({
+    ".ssh", ".gnupg", ".aws", ".gcloud",
+})
+
+
+def _is_dangerous_dotfile(resolved_path: str, raw_path: str = "") -> bool:
+    """Return True if path targets a sensitive dotfile that could enable privilege escalation.
+
+    Checks both the resolved path and the raw (pre-resolution) path so that
+    absolute paths to home-dir dotfiles (e.g. /home/user/.gitconfig) are caught
+    even when resolve_tool_path would clamp them to the workspace root.
+    """
+    for path_str in filter(None, [resolved_path, raw_path]):
+        p = pathlib.Path(path_str)
+        # Check filename against known dangerous dotfiles
+        if p.name in _DANGEROUS_FILES:
+            return True
+        # Check if inside dangerous directory under home
+        home = pathlib.Path.home()
+        try:
+            rel = p.relative_to(home)
+            if rel.parts and rel.parts[0] in _DANGEROUS_DIRS:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _has_dangerous_tilde(path_str: str) -> bool:
+    """Block tilde variants that expand unexpectedly: ~user, ~+, ~-"""
+    stripped = path_str.strip()
+    if re.match(r'^~[+\-a-zA-Z]', stripped):
+        return True
+    return False
+
+
 
 @tool(args_schema=FileReadArgs)
 def file_read(file_path: str, start_line: int = 0, end_line: int = 0) -> str:
@@ -111,6 +157,10 @@ def file_read(file_path: str, start_line: int = 0, end_line: int = 0) -> str:
     Returns:
         File contents with line numbers, or error message.
     """
+    # Block tilde variants that expand unexpectedly (~user, ~+, ~-)
+    if _has_dangerous_tilde(file_path):
+        return f"⛔ Tilde expansion variant '{file_path}' blocked — use absolute paths instead"
+
     # Block infinite-read device paths (CC: prevents hangs on /dev/zero etc.)
     normalized = file_path.replace("\\", "/").rstrip("/")
     if normalized in _BLOCKED_DEVICE_PATHS:
@@ -178,11 +228,19 @@ def file_write(file_path: str, content: str, create_dirs: bool = True) -> str:
     Returns:
         Success or error message.
     """
+    # Block tilde variants that expand unexpectedly (~user, ~+, ~-)
+    if _has_dangerous_tilde(file_path):
+        return f"⛔ Tilde expansion variant '{file_path}' blocked — use absolute paths instead"
+
     resolved = _resolve_path(file_path)
 
     # Bare git repo defense
     if _is_git_internal_write(resolved):
         return _GIT_WRITE_BLOCKED_MSG
+
+    # Sensitive dotfile protection
+    if _is_dangerous_dotfile(resolved, raw_path=file_path):
+        return f"⛔ Write blocked: {file_path} is a sensitive dotfile that could enable privilege escalation. Edit manually if intended."
 
     try:
         if create_dirs:
@@ -357,6 +415,10 @@ def file_edit(file_path: str, old_string: str, new_string: str) -> str:
     Returns:
         Success message with strategy used, or error.
     """
+    # Block tilde variants that expand unexpectedly (~user, ~+, ~-)
+    if _has_dangerous_tilde(file_path):
+        return f"⛔ Tilde expansion variant '{file_path}' blocked — use absolute paths instead"
+
     resolved = _resolve_path(file_path)
     if not os.path.isfile(resolved):
         return f"Error: File '{file_path}' not found."
@@ -364,6 +426,10 @@ def file_edit(file_path: str, old_string: str, new_string: str) -> str:
     # Bare git repo defense
     if _is_git_internal_write(resolved):
         return _GIT_WRITE_BLOCKED_MSG
+
+    # Sensitive dotfile protection
+    if _is_dangerous_dotfile(resolved, raw_path=file_path):
+        return f"⛔ Write blocked: {file_path} is a sensitive dotfile that could enable privilege escalation. Edit manually if intended."
 
     try:
         # newline="" preserves raw line endings (no OS-level \r\n→\n conversion)
@@ -524,6 +590,14 @@ def file_edit_batch(edits: list) -> str:
         # Bare git repo defense
         if _is_git_internal_write(resolved):
             return f"❌ Batch aborted at edit #{idx + 1}: {_GIT_WRITE_BLOCKED_MSG}"
+
+        # Sensitive dotfile protection
+        if _is_dangerous_dotfile(resolved, raw_path=file_path):
+            return (
+                f"❌ Batch aborted at edit #{idx + 1}: "
+                f"⛔ Write blocked: {file_path} is a sensitive dotfile that could enable privilege escalation. "
+                f"Edit manually if intended."
+            )
 
         try:
             # newline="" preserves raw line endings for accurate CRLF detection

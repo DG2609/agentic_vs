@@ -350,3 +350,57 @@ def test_apply_patch_invalid_path(workspace):
     )
     result = apply_patch.invoke({"patch": patch_text, "workspace": workspace})
     assert "error" in result.lower() or "outside" in result.lower() or "boundary" in result.lower()
+
+
+# ─────────────────────────────────────────────────────────────
+# Dangerous dotfile protection
+# ─────────────────────────────────────────────────────────────
+
+def test_gitconfig_write_blocked(workspace):
+    """file_write to ~/.gitconfig must be blocked."""
+    import pathlib
+    from agent.tools.file_ops import file_write
+    path = str(pathlib.Path.home() / ".gitconfig")
+    result = file_write.invoke({"file_path": path, "content": "[core]\n\tfsmonitor = evil\n"})
+    assert "blocked" in result.lower() or "⛔" in result, f"Expected block, got: {result}"
+
+
+def test_bashrc_write_blocked(workspace):
+    """file_write to ~/.bashrc must be blocked."""
+    import pathlib
+    from agent.tools.file_ops import file_write
+    path = str(pathlib.Path.home() / ".bashrc")
+    result = file_write.invoke({"file_path": path, "content": "export EVIL=1\n"})
+    assert "blocked" in result.lower() or "⛔" in result, f"Expected block, got: {result}"
+
+
+def test_normal_dotfile_allowed(workspace):
+    """file_write to .env inside the workspace must still be allowed."""
+    from agent.tools.file_ops import file_write
+    result = file_write.invoke({"file_path": ".env", "content": "SECRET=test\n"})
+    assert "written" in result.lower() or "✅" in result, f"Expected success, got: {result}"
+
+
+# ─────────────────────────────────────────────────────────────
+# Tilde variant rejection
+# ─────────────────────────────────────────────────────────────
+
+def test_tilde_user_rejected(workspace):
+    """file_read('~root/secret') must be blocked — ~user tilde variant."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "~root/secret"})
+    assert "blocked" in result.lower() or "⛔" in result, f"Expected block, got: {result}"
+
+
+def test_tilde_plus_rejected(workspace):
+    """file_read('~+/secret') must be blocked — ~+ tilde variant."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "~+/secret"})
+    assert "blocked" in result.lower() or "⛔" in result, f"Expected block, got: {result}"
+
+
+def test_tilde_minus_rejected(workspace):
+    """file_read('~-/secret') must be blocked — ~- tilde variant."""
+    from agent.tools.file_ops import file_read
+    result = file_read.invoke({"file_path": "~-/secret"})
+    assert "blocked" in result.lower() or "⛔" in result, f"Expected block, got: {result}"
