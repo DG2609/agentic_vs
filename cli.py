@@ -28,12 +28,16 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import config
 from agent.graph import build_graph, ALL_TOOLS
 from agent.hooks import run_lifecycle_hook, LIFECYCLE_HOOKS
+from agent.nodes import get_cache_stats
 from langgraph.checkpoint.memory import MemorySaver
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver as _SqliteSaver
     _HAS_SQLITE_SAVER = True
 except ImportError:
     _HAS_SQLITE_SAVER = False
+
+# ── Session-level tool usage counter ────────────────────────────
+_tool_usage: dict[str, int] = {}
 
 
 # ── Structured JSON log handler ─────────────────────────────
@@ -190,6 +194,36 @@ for lsp_name in ["lsp_definition", "lsp_references", "lsp_hover", "lsp_symbols",
     TOOL_ICONS[lsp_name] = ("◇", f"LSP {lsp_name.replace('lsp_', '')}")
 
 MODE_COLORS = {"planner": "yellow", "coder": "cyan", "doc": "green"}
+
+# ── Verbose mode ────────────────────────────────────────────
+_verbose = False  # bool — annotated name can't be used with 'global'
+
+# ── Daltonized theme color helpers ──────────────────────────
+# Palettes safe for protanopia / deuteranopia (ported from Claude Code).
+_DALTONIZED_PALETTES = {
+    "daltonized-light": {
+        "ai":   "#0059ff",   # blue  — AI responses
+        "tool": "#d97706",   # orange — tool output
+        "text": "#1a1a1a",   # dark gray on white bg
+    },
+    "daltonized-dark": {
+        "ai":   "#38bdf8",   # sky blue — AI responses
+        "tool": "#fbbf24",   # amber    — tool output
+        "text": "#e2e8f0",   # light gray on dark bg
+    },
+}
+
+
+def _theme_ai_color() -> str:
+    """Return the Rich markup color for AI response text given current theme."""
+    palette = _DALTONIZED_PALETTES.get(config.THEME)
+    return palette["ai"] if palette else "green"
+
+
+def _theme_tool_color() -> str:
+    """Return the Rich markup color for tool output given current theme."""
+    palette = _DALTONIZED_PALETTES.get(config.THEME)
+    return palette["tool"] if palette else "cyan"
 
 
 def _tool_display(tool_name: str, args: dict) -> tuple:
@@ -432,6 +466,14 @@ async def chat_loop(resume_id: str = None):
                     f"Tokens: [bold]{tokens_k}[/bold]"
                 )
                 continue
+            elif input_text.strip() == "/verbose":
+                global _verbose
+                _verbose = not _verbose
+                if _verbose:
+                    console.print("[dim]Verbose mode ON[/dim]")
+                else:
+                    console.print("[dim]Verbose mode OFF[/dim]")
+                continue
             elif input_text.startswith('/fork'):
                 # /fork [N]  — Fork current session at message N (default: now)
                 parts = input_text.split()
@@ -445,6 +487,34 @@ async def chat_loop(resume_id: str = None):
                 from agent.tools.session_tools import fork_session as _fork_session
                 result = _fork_session.invoke({"session_id": thread_id, "fork_at": fork_at})
                 console.print(result)
+                continue
+            elif input_text.strip() == "/insights":
+                from agent.tools.cost_tracker import format_cost
+                turns = _session_stats["turns"]
+                tokens = _session_stats["tokens"]
+                cost = _session_stats["cost"]
+                cost_str = format_cost(cost)
+                avg_tokens = (tokens // turns) if turns > 0 else 0
+                # Top tools by usage (sorted descending, up to 5)
+                top_tools = sorted(_tool_usage.items(), key=lambda x: x[1], reverse=True)[:5]
+                tools_str = "  ".join(f"{name} ({count}x)" for name, count in top_tools) or "none"
+                cache_stats = get_cache_stats()
+                cache_breaks = cache_stats.get("cache_breaks", 0)
+                lines = [
+                    f"  [bold]Turns:[/bold]              {turns}",
+                    f"  [bold]Total tokens:[/bold]       {tokens:,}",
+                    f"  [bold]Cost:[/bold]               {cost_str}",
+                    f"  [bold]Tools used:[/bold]         {tools_str}",
+                    f"  [bold]Avg tokens/turn:[/bold]    {avg_tokens:,}",
+                    f"  [bold]Prompt cache breaks:[/bold] {cache_breaks}",
+                    f"  [bold]Session ID:[/bold]         {thread_id}",
+                ]
+                console.print(Panel(
+                    "\n".join(lines),
+                    title="[bold cyan]Session Insights[/bold cyan]",
+                    border_style="cyan",
+                    padding=(0, 1),
+                ))
                 continue
             elif input_text.startswith('/plan'):
                 active_agent_override = "planner"
@@ -473,6 +543,16 @@ async def chat_loop(resume_id: str = None):
                     input_text = modified
 
             await run_agent(input_text, thread_id, active_agent_override, _session_stats)
+
+            # ── Verbose token usage ──────────────────────────
+            if _verbose and _session_stats is not None:
+                tokens = _session_stats.get("tokens", 0)
+                cost = _session_stats.get("cost", 0.0)
+                turns = _session_stats.get("turns", 0)
+                tokens_k = f"{tokens / 1000:.1f}K" if tokens >= 1000 else str(tokens)
+                console.print(
+                    f"  [dim]tokens: {tokens_k}  cost: ${cost:.4f}  turns: {turns}[/dim]"
+                )
 
             # ── Lifecycle: stop ──────────────────────────────
             if LIFECYCLE_HOOKS:
@@ -601,9 +681,9 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                     continue
 
                 icon, title = _tool_display(tool_name, args if isinstance(args, dict) else {})
-                
+                _tc = _theme_tool_color()
                 status = Status(
-                    f"  [cyan]{icon}[/cyan]  [dim]{title}[/dim]",
+                    f"  [{_tc}]{icon}[/{_tc}]  [dim]{title}[/dim]",
                     console=console,
                     spinner="dots",
                 )
@@ -618,6 +698,7 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                     "args": args if isinstance(args, dict) else {},
                 }
                 tool_counter += 1
+                _tool_usage[tool_name] = _tool_usage.get(tool_name, 0) + 1
 
             # ── Tool END ────────────────────────────────────
             elif kind == "on_tool_end":
@@ -658,10 +739,11 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                 elapsed_str = f" [dim]({_fmt_elapsed(elapsed)})[/dim]" if elapsed > 0 else ""
                 
                 # ── Render completion ───────────────────────
+                _tc = _theme_tool_color()
                 if tool_name == "terminal_exec":
                     if hasattr(output, "content"): output = output.content
                     cmd = (args if isinstance(args, dict) else {}).get("command", "command")
-                    console.print(f"  [green]✓[/green] [cyan]{icon}[/cyan]  [bold]{cmd}[/bold]{elapsed_str}")
+                    console.print(f"  [green]✓[/green] [{_tc}]{icon}[/{_tc}]  [bold]{cmd}[/bold]{elapsed_str}")
                     if output and str(output).strip():
                         lines = str(output).strip().split("\n")
                         preview = "\n".join(f"    {l}" for l in lines[:10])
@@ -669,12 +751,12 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                             preview += f"\n    [dim]… ({len(lines) - 10} more lines)[/dim]"
                         console.print(f"[dim]{preview}[/dim]")
                     console.print()
-                        
+
                 elif tool_name in ("file_edit", "file_write"):
-                    target = (args if isinstance(args, dict) else {}).get("file_path", 
+                    target = (args if isinstance(args, dict) else {}).get("file_path",
                               (args if isinstance(args, dict) else {}).get("TargetFile", "File"))
-                    console.print(f"  [green]✓[/green] [cyan]{icon}[/cyan]  [bold]{_short_path(target)}[/bold]{elapsed_str}")
-                    
+                    console.print(f"  [green]✓[/green] [{_tc}]{icon}[/{_tc}]  [bold]{_short_path(target)}[/bold]{elapsed_str}")
+
                     diff_str = ""
                     if isinstance(output, str) and "Diff:" in output:
                         diff_str = output.split("Diff:")[1]
@@ -684,7 +766,7 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                         console.print(Syntax(diff_str.strip(), "diff", theme="monokai", padding=(0, 4)))
                     console.print()
                 else:
-                    console.print(f"  [green]✓[/green] [cyan]{icon}[/cyan]  {title}{elapsed_str}")
+                    console.print(f"  [green]✓[/green] [{_tc}]{icon}[/{_tc}]  {title}{elapsed_str}")
 
     except Exception as e:
         err_msg = str(e)
@@ -789,8 +871,16 @@ if __name__ == "__main__":
         default=5,
         help="Max improvement rounds (default: 5, used with --improve).",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose/debug mode: show token usage after each AI response.",
+    )
 
     args = parser.parse_args()
+
+    if args.verbose:
+        _verbose = True
 
     if args.team:
         import config as _cfg

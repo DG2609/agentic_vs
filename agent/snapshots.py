@@ -91,6 +91,7 @@ def create_snapshot(
             rel = os.path.relpath(fpath, workspace)
         except ValueError:
             rel = os.path.basename(fpath)
+        rel = rel.replace("\\", "/")
 
         dest = files_dir / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -178,7 +179,7 @@ def revert_snapshot(snap_id: str) -> list[str]:
 
     try:
         for record in records:
-            rel_path = record["path"]
+            rel_path = record["path"].replace("\\", "/")
             existed = record.get("existed", False)
             target = os.path.join(workspace, rel_path)
             # Only back up files that existed in the original snapshot — files that
@@ -194,7 +195,7 @@ def revert_snapshot(snap_id: str) -> list[str]:
         # Step 2: Apply all reverts
         restored = []
         for record in records:
-            rel_path = record["path"]
+            rel_path = record["path"].replace("\\", "/")
             existed = record.get("existed", False)
             target = os.path.join(workspace, rel_path)
 

@@ -6,6 +6,7 @@ When config.SANDBOX_ENABLED=True and Docker is available, commands run inside
 an isolated container (network isolation, memory/CPU limits, no privilege escalation).
 Falls back to direct execution if Docker is unavailable.
 """
+import logging
 import os
 import re
 import subprocess
@@ -15,6 +16,7 @@ from agent.tools.truncation import truncate_output
 from agent.tools.utils import resolve_path_safe
 from models.tool_schemas import TerminalExecArgs
 
+logger = logging.getLogger(__name__)
 
 # ── Binary-hijacking env var scrub ───────────────────────────
 # These vars can redirect shared-library / interpreter loading and allow
@@ -283,7 +285,10 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
             proc.kill()
             try:
                 stdout, stderr = proc.communicate(timeout=5)
-            except Exception:
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            except Exception as e:
+                logger.warning("Unexpected error during process communication: %s", e)
                 stdout, stderr = "", ""
             return f"Command timed out after {max_timeout}s: {command}"
 

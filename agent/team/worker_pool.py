@@ -306,12 +306,17 @@ class WorkerPool:
         except asyncio.QueueFull:
             # Queue is full — drop oldest notification and warn
             try:
-                self.notification_queue.get_nowait()
-                logger.warning(
-                    "[pool] notification_queue full (maxsize=%d) — dropped oldest notification",
+                dropped = self.notification_queue.get_nowait()
+                logger.error(
+                    "[pool] notification_queue full (maxsize=%d) — dropped oldest notification; "
+                    "coordinator may hang waiting for lost task-complete signal. Dropped: %s",
                     self.notification_queue.maxsize,
+                    dropped[:200],
                 )
                 self.notification_queue.put_nowait(notification)
             except Exception:
-                pass  # If still full, silently drop
+                logger.critical(
+                    "[pool] notification_queue full and could not recover — notification LOST: %s",
+                    notification[:200],
+                )
         logger.info(f"[pool] notification pushed for {worker_id[:8]}: {status}")

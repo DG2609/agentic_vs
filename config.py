@@ -4,16 +4,36 @@ Uses Pydantic BaseSettings for type-safe, validated configuration.
 All settings can be overridden via environment variables or .env file.
 """
 import os
+import re as _re
 from pathlib import Path
 from typing import Literal
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+
+def _expand_env_refs(value: str) -> str:
+    """Expand {env:VAR} references in a config string. Warns for unset vars."""
+    def _sub(m: _re.Match) -> str:
+        var = m.group(1)
+        result = os.environ.get(var, "")
+        if not result:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Config: {env:%s} references unset env var", var
+            )
+        return result
+    return _re.sub(r'\{env:([^}]+)\}', _sub, value)
 
 
 # ── Resolve base paths before Settings class ────────────────
 _BASE_DIR = Path(__file__).parent
 _DATA_DIR = _BASE_DIR / "data"
-_DATA_DIR.mkdir(exist_ok=True)
+try:
+    _DATA_DIR.mkdir(exist_ok=True)
+except OSError as e:
+    import tempfile as _tempfile
+    _DATA_DIR = Path(_tempfile.gettempdir()) / "shadowdev_data"
+    _DATA_DIR.mkdir(exist_ok=True)
 
 
 class Settings(BaseSettings):
@@ -176,6 +196,22 @@ class Settings(BaseSettings):
         default_factory=lambda: ["AGENTS.md", "CLAUDE.md", "COPILOT.md", ".cursorrules"]
     )
 
+    # ── UI / Theme ───────────────────────────────────────────
+    THEME: str = Field(
+        default="default",
+        description="Color theme: 'default', 'dark', 'daltonized-light', or 'daltonized-dark'.",
+    )
+
+    # ── Reasoning effort ────────────────────────────────────
+    REASONING_EFFORT: Literal["none", "low", "medium", "high"] = Field(
+        default="none",
+        description=(
+            "Reasoning effort level for models that support extended thinking. "
+            "'none' = disabled. Supported by Claude Opus 4+ (Anthropic) and "
+            "OpenAI o1/o3 series models."
+        ),
+    )
+
     # ── Agent Teams ──────────────────────────────────────────
     COORDINATOR_MODE: bool = Field(
         default=False,
@@ -194,6 +230,15 @@ class Settings(BaseSettings):
         description="Shared scratchpad directory for cross-worker knowledge.",
     )
 
+    @model_validator(mode='after')
+    def expand_env_refs(self) -> 'Settings':
+        """Expand {env:VAR} references in all string config fields."""
+        for field_name in type(self).model_fields:
+            val = getattr(self, field_name, None)
+            if isinstance(val, str) and '{env:' in val:
+                object.__setattr__(self, field_name, _expand_env_refs(val))
+        return self
+
     @field_validator("WORKSPACE_DIR")
     @classmethod
     def ensure_workspace_exists(cls, v):
@@ -206,6 +251,29 @@ class Settings(BaseSettings):
         minimum = info.data.get("PRUNE_MINIMUM", 20000)
         if v < minimum:
             raise ValueError(f"PRUNE_PROTECT ({v}) must be >= PRUNE_MINIMUM ({minimum})")
+        return v
+
+    @field_validator("SANDBOX_NETWORK")
+    @classmethod
+    def validate_sandbox_network(cls, v):
+        allowed = {"none", "bridge", "host"}
+        if v.lower() not in allowed:
+            raise ValueError(f"SANDBOX_NETWORK must be one of {allowed}, got '{v}'")
+        return v.lower()
+
+    @field_validator("SANDBOX_MEMORY")
+    @classmethod
+    def validate_sandbox_memory(cls, v):
+        import re
+        if v and not re.fullmatch(r'\d+[bkmgBKMG]?', v):
+            raise ValueError(f"SANDBOX_MEMORY must be a Docker memory string like '512m' or '2g', got '{v}'")
+        return v
+
+    @field_validator("SANDBOX_CPUS")
+    @classmethod
+    def validate_sandbox_cpus(cls, v):
+        if v and not str(v).replace('.', '', 1).isdigit():
+            raise ValueError(f"SANDBOX_CPUS must be a numeric string like '1.5', got '{v}'")
         return v
 
     @field_validator("COMPACTION_BUFFER")
@@ -318,6 +386,10 @@ PRUNE_MINIMUM = _settings.PRUNE_MINIMUM
 PRUNE_PROTECT = _settings.PRUNE_PROTECT
 MODEL_CONTEXT_LIMITS = _settings.MODEL_CONTEXT_LIMITS
 RULES_FILENAMES = _settings.RULES_FILENAMES
+
+THEME = _settings.THEME
+
+REASONING_EFFORT = _settings.REASONING_EFFORT
 
 COORDINATOR_MODE = _settings.COORDINATOR_MODE
 TEAM_MAX_RETRIES = _settings.TEAM_MAX_RETRIES

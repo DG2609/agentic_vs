@@ -122,6 +122,24 @@ AGENT_COLORS = {
     "doc": "#42f587",
 }
 
+# ── Daltonized theme palettes (protanopia/deuteranopia-safe) ──
+# Ported from Claude Code's light-daltonized / dark-daltonized themes.
+DALTONIZED_PALETTES = {
+    "daltonized-light": {
+        "ai":   "#0059ff",   # blue  — AI response text
+        "tool": "#d97706",   # orange — tool output
+        "text": "#1a1a1a",   # dark gray on white background
+    },
+    "daltonized-dark": {
+        "ai":   "#38bdf8",   # sky blue — AI response text
+        "tool": "#fbbf24",   # amber    — tool output
+        "text": "#e2e8f0",   # light gray on dark background
+    },
+}
+
+# Ordered cycle: default dark → default light → daltonized dark → daltonized light
+_THEME_CYCLE = ["textual-dark", "textual-light", "daltonized-dark", "daltonized-light"]
+
 
 # ── Helpers ────────────────────────────────────────────────
 
@@ -214,7 +232,7 @@ COMMANDS = [
     ("/new", "New session"),
     ("/sessions", "Show session list"),
     ("/help", "Show help"),
-    ("/theme", "Toggle dark/light theme"),
+    ("/theme", "Cycle theme: dark → light → daltonized-dark → daltonized-light"),
     ("/compact", "Compact conversation context"),
     ("/exit", "Quit ShadowDev"),
 ]
@@ -788,8 +806,29 @@ class ShadowDevTUI(App):
             self.action_new_session()
             return True
         elif command == "/theme":
-            self.theme = "textual-light" if self.theme == "textual-dark" else "textual-dark"
-            self.notify(f"Theme: {self.theme}")
+            # Use config.THEME as the source of truth for the logical theme name.
+            current_logical = config.THEME if config.THEME in _THEME_CYCLE else _THEME_CYCLE[0]
+            try:
+                idx = _THEME_CYCLE.index(current_logical)
+            except ValueError:
+                idx = 0
+            next_theme = _THEME_CYCLE[(idx + 1) % len(_THEME_CYCLE)]
+            # Map daltonized variants onto a Textual base theme for rendering
+            textual_theme = "textual-light" if "light" in next_theme else "textual-dark"
+            self.theme = textual_theme
+            # Persist logical theme name and apply daltonized agent colors if needed
+            config.THEME = next_theme
+            if next_theme in DALTONIZED_PALETTES:
+                palette = DALTONIZED_PALETTES[next_theme]
+                AGENT_COLORS["planner"] = palette["ai"]
+                AGENT_COLORS["coder"] = palette["ai"]
+                AGENT_COLORS["doc"] = palette["tool"]
+            else:
+                # Restore defaults
+                AGENT_COLORS["planner"] = "#f5c542"
+                AGENT_COLORS["coder"] = "#42b0f5"
+                AGENT_COLORS["doc"] = "#42f587"
+            self.notify(f"Theme: {next_theme}")
             return True
         elif command in ("/plan", "/code", "/doc"):
             # If there's text after, treat as message
@@ -1034,8 +1073,8 @@ class ShadowDevTUI(App):
         finally:
             async with self._state_lock:
                 self.active_tools.clear()
-            self._agent_status = "idle"
-            self.is_running = False
+                self._agent_status = "idle"
+                self.is_running = False
             sb.busy = False
             sb.busy_label = "working..."  # reset for next run
             # Clear tree when agent finishes
@@ -1076,7 +1115,7 @@ class ShadowDevTUI(App):
 | `/doc <msg>` | Send as Doc agent |
 | `/clear` | Clear chat |
 | `/new` | New session |
-| `/theme` | Toggle theme |
+| `/theme` | Cycle theme (dark/light/daltonized-dark/daltonized-light) |
 | `/help` | This help |
 | `/exit` | Quit |
 
@@ -1119,11 +1158,11 @@ class ShadowDevTUI(App):
         self.has_messages = False
         self.notify("Chat cleared")
 
-    def action_new_session(self) -> None:
+    async def action_new_session(self) -> None:
         self.thread_id = str(uuid.uuid4())
-        # Note: no lock needed here since new_session is only callable when not running
         self.modified_files.clear()
-        self.active_tools.clear()
+        async with self._state_lock:
+            self.active_tools.clear()
         self.printed_replies.clear()
         self._abort_event.clear()
         self.total_tokens = 0

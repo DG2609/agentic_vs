@@ -104,8 +104,8 @@ def _is_git_internal_write(resolved_path: str) -> bool:
 _DANGEROUS_FILES = frozenset({
     ".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc",
     ".zprofile", ".profile", ".bash_logout", ".zlogout",
-    ".ripgreprc", ".mcp.json", ".npmrc", ".pip/pip.conf",
-    ".ssh/config", ".ssh/authorized_keys", ".ssh/known_hosts",
+    ".ripgreprc", ".mcp.json", ".npmrc",
+    # .ssh/* covered by _DANGEROUS_DIRS below — no path-separator entries here
 })
 
 _DANGEROUS_DIRS = frozenset({
@@ -123,7 +123,10 @@ def _is_dangerous_dotfile(resolved_path: str, raw_path: str = "") -> bool:
     for path_str in filter(None, [resolved_path, raw_path]):
         p = pathlib.Path(path_str)
         # Check filename against known dangerous dotfiles
-        if p.name in _DANGEROUS_FILES:
+        if p.name.lower() in _DANGEROUS_FILES:
+            return True
+        # Check nested dangerous file: .pip/pip.conf pattern
+        if p.name.lower() == "pip.conf" and p.parent.name.lower() == ".pip":
             return True
         # Check if inside dangerous directory under home
         home = pathlib.Path.home()

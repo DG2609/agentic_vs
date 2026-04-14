@@ -35,6 +35,7 @@ from agent.tools.code_search import code_search, grep_search, batch_read
 from agent.tools.file_ops import (
     file_read, file_write, file_list, file_edit, glob_search, file_edit_batch, apply_patch,
 )
+from agent.tools.notebook import notebook_edit
 from agent.tools.terminal import terminal_exec
 from agent.tools.code_analyzer import code_analyze
 from agent.tools.semantic import semantic_search, index_codebase
@@ -103,6 +104,7 @@ _TOOL_TIMEOUT_S = float(os.getenv("SHADOWDEV_TOOL_TIMEOUT_S", "120"))
 _CORE_TOOLS = [
     code_search, grep_search, batch_read, semantic_search, index_codebase,
     file_read, file_write, file_list, file_edit, file_edit_batch, glob_search, apply_patch,
+    notebook_edit,
     terminal_exec, code_analyze, webfetch, web_search,
     lsp_definition, lsp_references, lsp_hover, lsp_symbols, lsp_diagnostics,
     lsp_go_to_definition, lsp_find_references,
@@ -144,6 +146,7 @@ PLANNER_TOOLS = [
     # Search & read
     code_search, grep_search, batch_read, semantic_search, index_codebase,
     file_read, glob_search, file_list, code_analyze, webfetch, web_search,
+    notebook_edit,
     # Patch application (read-safe preview also useful for planner)
     apply_patch,
     # Code insight
@@ -229,14 +232,14 @@ register_hook(
 )
 
 # Snapshot: auto-backup files before write tools modify them
-_SNAPSHOT_TOOLS = frozenset({"file_write", "file_edit", "file_edit_batch"})
+_SNAPSHOT_TOOLS = frozenset({"file_write", "file_edit", "file_edit_batch", "notebook_edit"})
 
 
 async def _snapshot_pre_hook(tool_name: str, tool_args: dict):
     """Pre-hook: create file snapshot before write operations."""
     if tool_name not in _SNAPSHOT_TOOLS:
         return None
-    file_path = tool_args.get("file_path", "")
+    file_path = tool_args.get("file_path", "") or tool_args.get("notebook_path", "")
     if not file_path:
         # file_edit_batch may have edits list
         edits = tool_args.get("edits", [])

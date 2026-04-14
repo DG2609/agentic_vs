@@ -109,7 +109,7 @@ def _ripgrep_search(
             if proc and proc.poll() is None:
                 _kill_process_gracefully(proc)
 
-        if proc.returncode > 1:
+        if proc is not None and proc.returncode > 1:
             return None
         return stdout
 

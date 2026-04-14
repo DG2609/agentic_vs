@@ -34,7 +34,9 @@ async def test_spawn_returns_uuid(pool):
             tools=[],
             description="Test worker",
         )
-    assert len(worker_id) == 36
+    # New format: <role-prefix>-<8 random chars>  e.g. "e-k7mn2pxz" (10 chars)
+    assert len(worker_id) == 10
+    assert worker_id.startswith("e-")  # explorer prefix
 
 
 @pytest.mark.asyncio

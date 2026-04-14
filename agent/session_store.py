@@ -23,39 +23,82 @@ _DB_PATH = os.path.join(str(config.DATA_DIR), "sessions.db")
 def _get_conn() -> sqlite3.Connection:
     """Get a connection to the sessions database."""
     os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(_DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            session_id TEXT PRIMARY KEY,
-            title TEXT DEFAULT '',
-            agent_mode TEXT DEFAULT 'planner',
-            workspace TEXT DEFAULT '',
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL,
-            message_count INTEGER DEFAULT 0,
-            total_tokens INTEGER DEFAULT 0,
-            metadata TEXT DEFAULT '{}'
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS session_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            timestamp REAL NOT NULL,
-            tool_name TEXT DEFAULT NULL,
-            tool_args TEXT DEFAULT NULL,
-            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_session_messages_sid
-        ON session_messages(session_id)
-    """)
-    conn.commit()
-    return conn
+    try:
+        conn = sqlite3.connect(_DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL")
+        result = conn.execute("PRAGMA integrity_check").fetchone()
+        if result is None or result[0] != "ok":
+            raise sqlite3.DatabaseError(f"integrity_check failed: {result}")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                title TEXT DEFAULT '',
+                agent_mode TEXT DEFAULT 'planner',
+                workspace TEXT DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                message_count INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                metadata TEXT DEFAULT '{}'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                tool_name TEXT DEFAULT NULL,
+                tool_args TEXT DEFAULT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_session_messages_sid
+            ON session_messages(session_id)
+        """)
+        conn.commit()
+        return conn
+    except (sqlite3.DatabaseError, sqlite3.OperationalError) as e:
+        logger.warning(f"sessions.db corrupted ({e}), recreating database")
+        try:
+            os.unlink(_DB_PATH)
+        except OSError:
+            pass
+        conn = sqlite3.connect(_DB_PATH)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_id TEXT PRIMARY KEY,
+                title TEXT DEFAULT '',
+                agent_mode TEXT DEFAULT 'planner',
+                workspace TEXT DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                message_count INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                metadata TEXT DEFAULT '{}'
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                tool_name TEXT DEFAULT NULL,
+                tool_args TEXT DEFAULT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_session_messages_sid
+            ON session_messages(session_id)
+        """)
+        conn.commit()
+        return conn
 
 
 def save_session(

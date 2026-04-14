@@ -270,3 +270,65 @@ def test_format_tool_tree_last_prefix():
     assert lines[-1].startswith("└─")
     for line in lines[:-1]:
         assert line.startswith("├─")
+
+
+# ── Daltonized theme tests ────────────────────────────────────
+
+from tui import DALTONIZED_PALETTES, _THEME_CYCLE
+
+
+def test_daltonized_palettes_has_both_keys():
+    """DALTONIZED_PALETTES must contain both light and dark variants."""
+    assert "daltonized-light" in DALTONIZED_PALETTES
+    assert "daltonized-dark" in DALTONIZED_PALETTES
+
+
+def test_daltonized_palettes_required_color_keys():
+    """Each palette must define the three required color keys."""
+    required_keys = {"ai", "tool", "text"}
+    for variant, palette in DALTONIZED_PALETTES.items():
+        for key in required_keys:
+            assert key in palette, f"Palette '{variant}' missing required key '{key}'"
+
+
+def test_daltonized_palette_values_are_strings():
+    """All palette color values must be strings."""
+    for variant, palette in DALTONIZED_PALETTES.items():
+        for key, value in palette.items():
+            assert isinstance(value, str), (
+                f"Palette '{variant}' key '{key}' must be a str, got {type(value)}"
+            )
+
+
+def test_daltonized_palette_hex_colors_are_valid():
+    """All palette color values must be valid 6-digit hex color strings (#rrggbb)."""
+    import re
+    hex_re = re.compile(r'^#[0-9a-fA-F]{6}$')
+    for variant, palette in DALTONIZED_PALETTES.items():
+        for key, value in palette.items():
+            assert hex_re.match(value), (
+                f"Palette '{variant}' key '{key}' has invalid hex color '{value}'"
+            )
+
+
+def test_theme_cycle_contains_all_four_themes():
+    """_THEME_CYCLE must list all four expected themes."""
+    expected = {"textual-dark", "textual-light", "daltonized-dark", "daltonized-light"}
+    assert set(_THEME_CYCLE) == expected, (
+        f"_THEME_CYCLE has {set(_THEME_CYCLE)}, expected {expected}"
+    )
+
+
+def test_theme_cycle_length():
+    """_THEME_CYCLE must have exactly 4 entries (no duplicates)."""
+    assert len(_THEME_CYCLE) == 4
+
+
+def test_theme_cycle_is_list():
+    assert isinstance(_THEME_CYCLE, list)
+
+
+def test_daltonized_themes_in_theme_cycle():
+    """Both daltonized variants must appear in _THEME_CYCLE."""
+    assert "daltonized-light" in _THEME_CYCLE
+    assert "daltonized-dark" in _THEME_CYCLE

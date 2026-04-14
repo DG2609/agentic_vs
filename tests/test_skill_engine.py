@@ -192,3 +192,111 @@ def test_invoke_skill_meta_fields(engine, skill_dirs):
 # ── Need textwrap for one test ────────────────────────────────
 
 import textwrap
+
+
+# ── _simple_yaml — frontmatter parsing ───────────────────────
+
+def test_simple_yaml_scalar_string(engine):
+    result = engine._simple_yaml("model: claude-opus-4-6")
+    assert result == {"model": "claude-opus-4-6"}
+
+
+def test_simple_yaml_inline_list(engine):
+    result = engine._simple_yaml("tools: [file_read, code_search]")
+    assert result == {"tools": ["file_read", "code_search"]}
+
+
+def test_simple_yaml_block_list(engine):
+    result = engine._simple_yaml("tools:\n- file_read\n- code_search")
+    assert result == {"tools": ["file_read", "code_search"]}
+
+
+def test_simple_yaml_empty_string(engine):
+    result = engine._simple_yaml("")
+    assert result == {}
+
+
+def test_simple_yaml_comment_lines(engine):
+    result = engine._simple_yaml("# this is a comment\nmodel: gpt-4o")
+    assert result == {"model": "gpt-4o"}
+
+
+def test_simple_yaml_invalid_does_not_crash(engine):
+    """Malformed / unexpected input must not raise — returns best-effort dict."""
+    # Indented key without a parent (not valid top-level) — should not crash
+    result = engine._simple_yaml("  indented_key: value")
+    assert isinstance(result, dict)
+
+
+def test_simple_yaml_boolean_coercion(engine):
+    result = engine._simple_yaml("subtask: true")
+    assert result == {"subtask": True}
+
+
+def test_simple_yaml_multiple_scalars(engine):
+    text = "model: claude-opus-4-6\nversion: 1.0\nsubtask: false"
+    result = engine._simple_yaml(text)
+    assert result["model"] == "claude-opus-4-6"
+    assert result["subtask"] is False
+
+
+# ── SkillMeta defaults ────────────────────────────────────────
+
+def test_skill_meta_model_default():
+    from agent.skill_engine import SkillMeta
+    meta = SkillMeta(name="test")
+    assert meta.model == ""
+
+
+def test_skill_meta_tools_default():
+    from agent.skill_engine import SkillMeta
+    meta = SkillMeta(name="test")
+    assert meta.tools == []
+
+
+def test_skill_meta_description_default():
+    from agent.skill_engine import SkillMeta
+    meta = SkillMeta(name="test")
+    assert meta.description == ""
+
+
+def test_skill_meta_subtask_default():
+    from agent.skill_engine import SkillMeta
+    meta = SkillMeta(name="test")
+    assert meta.subtask is False
+
+
+def test_skill_meta_version_default():
+    from agent.skill_engine import SkillMeta
+    meta = SkillMeta(name="test")
+    assert meta.version == ""
+
+
+# ── Frontmatter round-trip via _parse_frontmatter ─────────────
+
+def test_parse_frontmatter_model_field(engine):
+    text = "---\nname: demo\nmodel: claude-opus-4-6\n---\n\nBody."
+    meta, _ = engine._parse_frontmatter(text)
+    assert meta.get("model") == "claude-opus-4-6"
+
+
+def test_parse_frontmatter_tools_inline_list(engine):
+    text = "---\nname: demo\ntools: [file_read, code_search]\n---\n\nBody."
+    meta, _ = engine._parse_frontmatter(text)
+    assert meta.get("tools") == ["file_read", "code_search"]
+
+
+def test_parse_frontmatter_tools_block_list(engine):
+    text = "---\nname: demo\ntools:\n- file_read\n- code_search\n---\n\nBody."
+    meta, _ = engine._parse_frontmatter(text)
+    assert meta.get("tools") == ["file_read", "code_search"]
+
+
+def test_parse_frontmatter_garbage_does_not_crash(engine):
+    """Completely non-YAML frontmatter content should return an empty or partial dict."""
+    text = "---\n!!!\x00corrupt\x01data###\n---\n\nBody."
+    try:
+        meta, body = engine._parse_frontmatter(text)
+        assert isinstance(meta, dict)
+    except Exception as exc:
+        pytest.fail(f"_parse_frontmatter raised unexpectedly: {exc}")

@@ -84,6 +84,25 @@ def _process_includes(content: str, base_dir: Path, visited: set) -> str:
     return result
 
 
+def load_glossary(workspace: str = "") -> str:
+    """Load glossary files from .shadowdev/glossary/*.md as additional context."""
+    cwd = Path(workspace) if workspace else Path.cwd()
+    glossary_dir = cwd / ".shadowdev" / "glossary"
+    if not glossary_dir.exists():
+        return ""
+    parts = []
+    for md_file in sorted(glossary_dir.glob("*.md")):
+        try:
+            content = md_file.read_text(encoding="utf-8").strip()
+            if content:
+                parts.append(f"## {md_file.stem}\n{content}")
+        except OSError:
+            pass
+    if not parts:
+        return ""
+    return "# Project Glossary\n\n" + "\n\n".join(parts)
+
+
 def load_project_rules(workspace: str = "") -> str:
     """Load and concatenate all applicable rules files.
 
@@ -97,9 +116,19 @@ def load_project_rules(workspace: str = "") -> str:
     # Build mtime signature from all candidate paths that exist
     home = Path.home()
     candidates = _candidate_paths(cwd, home)
+    # Include glossary files in mtime signature so cache busts on changes
+    glossary_dir = cwd / ".shadowdev" / "glossary"
+    if glossary_dir.is_dir():
+        candidates = candidates + sorted(glossary_dir.glob("*.md"))
     mtime_sig = _mtime_signature(candidates)
 
-    return _cached_rules(cwd_str, mtime_sig)
+    combined = _cached_rules(cwd_str, mtime_sig)
+
+    glossary = load_glossary(str(cwd))
+    if glossary:
+        combined += f"\n\n{glossary}"
+
+    return combined
 
 
 def _candidate_paths(cwd: Path, home: Path) -> list:

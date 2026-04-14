@@ -13,6 +13,7 @@ import os
 import json
 import logging
 import random
+import subprocess as _subprocess
 from langchain_core.messages import (
     SystemMessage,
     HumanMessage,
@@ -145,6 +146,17 @@ MANUAL_COMPACT_BUFFER = 3_000
 # ── Doom loop detection ────────────────────────────────────────
 DOOM_LOOP_MAX = 3  # max identical consecutive tool calls before breaking
 
+# ── Prompt cache break tracking ────────────────────────────────
+_prompt_cache_breaks: int = 0
+_last_cache_break_tokens: int = 0
+
+
+def get_cache_stats() -> dict:
+    """Return prompt cache break statistics for the current session."""
+    return {
+        "cache_breaks": _prompt_cache_breaks,
+    }
+
 
 # ─────────────────────────────────────────────────────────────
 # LLM creation
@@ -163,20 +175,36 @@ def _create_llm(streaming: bool = True, temperature: float = 0.3, fast: bool = F
     if provider == "openai":
         from langchain_openai import ChatOpenAI
         model = (config.OPENAI_FAST_MODEL or config.OPENAI_MODEL) if fast else config.OPENAI_MODEL
+        openai_kwargs: dict = {}
+        effort = getattr(config, "REASONING_EFFORT", "none")
+        if effort != "none":
+            # o1/o3 series: pass reasoning_effort via model_kwargs
+            openai_kwargs["model_kwargs"] = {"reasoning_effort": effort}
         return ChatOpenAI(
             model=model,
             api_key=config.OPENAI_API_KEY,
             temperature=temperature,
             streaming=streaming,
+            **openai_kwargs,
         )
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
         model = (config.ANTHROPIC_FAST_MODEL or config.ANTHROPIC_MODEL) if fast else config.ANTHROPIC_MODEL
+        anthropic_kwargs: dict = {}
+        effort = getattr(config, "REASONING_EFFORT", "none")
+        if effort != "none":
+            # Claude extended thinking: map effort level to budget_tokens
+            _budget_map = {"low": 1024, "medium": 4096, "high": 16384}
+            budget = _budget_map.get(effort, 4096)
+            anthropic_kwargs["model_kwargs"] = {
+                "thinking": {"type": "enabled", "budget_tokens": budget}
+            }
         return ChatAnthropic(
             model=model,
             api_key=config.ANTHROPIC_API_KEY,
             temperature=temperature,
             streaming=streaming,
+            **anthropic_kwargs,
         )
     elif provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
@@ -218,8 +246,14 @@ def _create_llm(streaming: bool = True, temperature: float = 0.3, fast: bool = F
 
 
 def get_llm(tools: list):
-    """Create and return the LLM with tools bound."""
+    """Create and return the LLM with tools bound.
+
+    For Anthropic, passes cache_control to enable prompt caching on the tool
+    list (up to 90% cost reduction on cached tokens for large tool schemas).
+    """
     llm = _create_llm(streaming=True)
+    if config.LLM_PROVIDER == "anthropic":
+        return llm.bind_tools(tools, cache_control={"type": "ephemeral"})
     return llm.bind_tools(tools)
 
 
@@ -254,6 +288,51 @@ def _is_context_overflow(exc: Exception) -> bool:
     return any(pattern in msg for pattern in _CONTEXT_OVERFLOW_ERRORS)
 
 
+class FreeUsageLimitError(Exception):
+    """Raised when the API free tier limit is exhausted (not a transient error)."""
+    pass
+
+
+_FREE_LIMIT_PATTERNS = (
+    "free tier", "free plan", "free limit", "exceeded your free",
+    "upgrade your plan", "free quota", "no free",
+)
+
+
+def _is_free_limit_error(exc: Exception) -> bool:
+    """Return True if *exc* indicates a free-tier exhaustion (non-retryable)."""
+    msg = str(exc).lower()
+    return any(p in msg for p in _FREE_LIMIT_PATTERNS)
+
+
+def _get_retry_after(exc: Exception) -> "float | None":
+    """Extract Retry-After seconds from exception headers if available."""
+    resp = getattr(exc, 'response', None)
+    if resp is None:
+        return None
+    headers = getattr(resp, 'headers', {})
+    # Retry-After can be seconds or HTTP date
+    ra = headers.get('retry-after') or headers.get('Retry-After')
+    if ra:
+        try:
+            return float(ra)
+        except ValueError:
+            pass
+    # OpenAI-specific: x-ratelimit-reset-requests (in seconds like "1.5s" or "500ms")
+    rr = headers.get('x-ratelimit-reset-requests', '')
+    if rr.endswith('ms'):
+        try:
+            return float(rr[:-2]) / 1000
+        except ValueError:
+            pass
+    if rr.endswith('s'):
+        try:
+            return float(rr[:-1])
+        except ValueError:
+            pass
+    return None
+
+
 # ─────────────────────────────────────────────────────────────
 # Retry wrapper for LLM invocation
 # ─────────────────────────────────────────────────────────────
@@ -286,6 +365,10 @@ async def _invoke_with_retry(llm, messages: list, max_retries: int = _RETRY_MAX_
             if _is_context_overflow(e):
                 raise ContextOverflowError(e) from e
 
+            # Free-tier exhaustion is non-retryable — retrying will never succeed.
+            if _is_free_limit_error(e):
+                raise FreeUsageLimitError(str(e)) from e
+
             is_529 = "529" in err_msg or "overloaded" in err_msg
             is_retryable = is_529 or any(k in err_msg for k in [
                 "timeout", "connection", "rate_limit", "429", "503", "502",
@@ -301,6 +384,10 @@ async def _invoke_with_retry(llm, messages: list, max_retries: int = _RETRY_MAX_
             if is_retryable and attempt < max_retries - 1:
                 wait_ms = min(_RETRY_BASE_MS * (2 ** attempt), _RETRY_MAX_MS)
                 wait_ms += random.uniform(0, 0.25 * wait_ms)
+                # Honour Retry-After / x-ratelimit-reset-requests from response headers
+                retry_after = _get_retry_after(e)
+                if retry_after is not None:
+                    wait_ms = min(retry_after * 1000, 60_000)  # cap at 60 s
                 wait_s = wait_ms / 1000
                 logger.warning(
                     f"[llm] Retryable error attempt {attempt + 1}/{max_retries} "
@@ -587,6 +674,42 @@ def _prune_tool_outputs(messages: list) -> list:
     return pruned
 
 
+def _get_git_context(workspace: str) -> str:
+    """Get current git state for context injection. Returns empty string if not in a git repo."""
+    try:
+        branch_r = _subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=workspace or ".", capture_output=True, text=True, timeout=3
+        )
+        branch = branch_r.stdout.strip()
+        if not branch or branch_r.returncode != 0:
+            return ""
+
+        log_r = _subprocess.run(
+            ["git", "log", "--oneline", "-5"],
+            cwd=workspace or ".", capture_output=True, text=True, timeout=3
+        )
+        status_r = _subprocess.run(
+            ["git", "status", "--short"],
+            cwd=workspace or ".", capture_output=True, text=True, timeout=3
+        )
+        parts = [f"Branch: {branch}"]
+        if log_r.stdout.strip():
+            parts.append(f"Recent commits:\n{log_r.stdout.strip()}")
+        if status_r.stdout.strip():
+            parts.append(f"Modified files:\n{status_r.stdout.strip()}")
+        return "\n".join(parts)
+    except FileNotFoundError:
+        return ""  # git not installed — silent, expected
+    except _subprocess.TimeoutExpired:
+        return ""  # git hung — silent
+    except PermissionError as e:
+        logger.warning("git context: permission denied in workspace: %s", e)
+        return ""
+    except Exception:
+        return ""  # other: silent
+
+
 # ─────────────────────────────────────────────────────────────
 # Agent node
 # ─────────────────────────────────────────────────────────────
@@ -672,19 +795,44 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     if state.workspace:
         system_content += f"\n\n## Current Workspace\n{state.workspace}"
 
+    # 7. Dynamic git context (branch / recent commits / modified files)
+    git_ctx = _get_git_context(state.workspace or config.WORKSPACE_DIR or ".")
+    if git_ctx:
+        system_content += f"\n\n## Current Git State\n{git_ctx}"
+
+    # Build system message — add cache_control for Anthropic prompt caching
+    # (cache_control on the system message covers the stable prompt prefix,
+    # delivering up to 90% cost reduction on repeated/cached tokens)
+    if config.LLM_PROVIDER == "anthropic":
+        system_msg = SystemMessage(
+            content=system_content,
+            additional_kwargs={"cache_control": {"type": "ephemeral"}},
+        )
+    else:
+        system_msg = SystemMessage(content=system_content)
+
     # Inject pending team worker notifications as HumanMessages
     notifications = getattr(state, 'team_notifications', [])
     injected_notifications = False
     if notifications and (getattr(state, 'coordinator_mode', False) or is_coordinator_mode()):
         extra_messages = [HumanMessage(content=n) for n in notifications]
         pruned = _prune_tool_outputs(messages)
-        full_messages = [SystemMessage(content=system_content)] + extra_messages + pruned
+        full_messages = [system_msg] + extra_messages + pruned
         injected_notifications = True
     else:
-        full_messages = [SystemMessage(content=system_content)] + _prune_tool_outputs(messages)
+        full_messages = [system_msg] + _prune_tool_outputs(messages)
 
     try:
         response = await _invoke_with_retry(llm, full_messages)
+    except FreeUsageLimitError as e:
+        return {
+            "messages": [AIMessage(
+                content=(
+                    f"\u26a0\ufe0f Free tier limit reached. Please upgrade your API plan "
+                    f"or switch to a different provider.\n\nDetails: {e}"
+                )
+            )]
+        }
     except ContextOverflowError as overflow_exc:
         # ── Reactive compaction (CC pattern) ─────────────────────────
         # If we've already tried compacting this turn, surface the error.
@@ -986,7 +1134,21 @@ async def micro_compact_node(state: AgentState) -> dict:
     new_messages = head + [micro_summary_msg] + tail
 
     # Replace all current messages with the condensed list
-    delete_msgs = [RemoveMessage(id=m.id) for m in messages if hasattr(m, "id") and m.id]
+    delete_msgs = []
+    for m in messages:
+        msg_id = getattr(m, "id", None)
+        if not msg_id:
+            logger.warning("micro_compact_node: skipping message without ID (type=%s)", type(m).__name__)
+            continue
+        delete_msgs.append(RemoveMessage(id=msg_id))
+
+    global _prompt_cache_breaks
+    _prompt_cache_breaks += 1
+    logger.info(
+        "Prompt cache break #%d (micro-compact): next request will not benefit from cached tokens",
+        _prompt_cache_breaks,
+    )
+
     return {"messages": delete_msgs + new_messages}
 
 
@@ -1069,6 +1231,13 @@ async def summarize_node(state: AgentState) -> dict:
     # Re-inject content of skills that were invoked during the session.
     # Capped at 3 skills x 4 KB = 12 KB max.
     skill_messages = _build_skill_reinjection_messages(messages)
+
+    global _prompt_cache_breaks
+    _prompt_cache_breaks += 1
+    logger.info(
+        "Prompt cache break #%d (summarize): next request will not benefit from cached tokens",
+        _prompt_cache_breaks,
+    )
 
     result = {
         "summary": summary_text,

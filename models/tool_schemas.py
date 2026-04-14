@@ -11,7 +11,7 @@ Key benefits:
 - Field descriptions guide LLM on correct usage
 """
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from typing import Literal, Optional
 
 
 # ═══════════════════════════════════════════════════════════
@@ -33,6 +33,13 @@ class FileReadArgs(BaseModel):
         ge=0,
         description="End line (1-indexed, inclusive). 0 = read to end."
     )
+
+    @field_validator("file_path")
+    @classmethod
+    def file_path_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("file_path cannot be empty")
+        return v
 
     @field_validator("end_line")
     @classmethod
@@ -56,6 +63,13 @@ class FileWriteArgs(BaseModel):
         description="Create parent directories if they don't exist."
     )
 
+    @field_validator("file_path")
+    @classmethod
+    def file_path_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("file_path cannot be empty")
+        return v
+
 
 class FileEditArgs(BaseModel):
     """Arguments for editing a file with fuzzy matching."""
@@ -70,6 +84,13 @@ class FileEditArgs(BaseModel):
     new_string: str = Field(
         description="The replacement text. Must be the complete replacement including context."
     )
+
+    @field_validator("file_path")
+    @classmethod
+    def file_path_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("file_path cannot be empty")
+        return v
 
     @field_validator("old_string")
     @classmethod
@@ -118,6 +139,14 @@ class CodeSearchArgs(BaseModel):
         description="Search pattern — can be a keyword, function name, regex, or error message. "
         "Supports regex syntax."
     )
+
+    @field_validator("query")
+    @classmethod
+    def query_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("query cannot be empty")
+        return v
+
     directory: str = Field(
         default="",
         description="Directory to search in. Empty = workspace root."
@@ -196,6 +225,13 @@ class TerminalExecArgs(BaseModel):
         le=300,
         description="Max execution time in seconds (0 = default 30s, max 300s)."
     )
+
+    @field_validator("command")
+    @classmethod
+    def command_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("command cannot be empty")
+        return v
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1131,4 +1167,39 @@ class ApplyPatchInput(BaseModel):
     def patch_not_empty(cls, v):
         if not v.strip():
             raise ValueError("patch cannot be empty")
+        return v
+
+
+# ═══════════════════════════════════════════════════════════
+# Notebook Edit
+# ═══════════════════════════════════════════════════════════
+
+class NotebookEditArgs(BaseModel):
+    """Arguments for editing Jupyter notebook cells."""
+    notebook_path: str = Field(description="Path to the .ipynb notebook file.")
+    action: Literal["read", "edit", "insert", "delete"] = Field(
+        description=(
+            "Action: 'read' lists all cells, 'edit' replaces cell content, "
+            "'insert' adds a new cell, 'delete' removes a cell."
+        )
+    )
+    cell_index: int = Field(
+        default=0,
+        ge=0,
+        description="Zero-based cell index. Required for edit/insert/delete.",
+    )
+    cell_type: Literal["code", "markdown"] = Field(
+        default="code",
+        description="Cell type for insert action.",
+    )
+    source: str = Field(
+        default="",
+        description="New cell source content for edit or insert actions.",
+    )
+
+    @field_validator("notebook_path")
+    @classmethod
+    def path_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("notebook_path cannot be empty")
         return v

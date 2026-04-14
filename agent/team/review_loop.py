@@ -71,18 +71,12 @@ class ReviewLoop:
                 return ReviewResult(passed=False, exhausted=True, issues=issues)
 
             retry_prompt = (
-                f"A reviewer found issues with the implementation (attempt {attempt + 1}/{self.max_retries}).\n\n"
-                f"Changed files: {files_list}\n\n"
-                f"Issues found:\n{issues}\n\n"
-                f"Fix ALL of these issues. Read each affected file first, make the targeted changes, "
+                f"Your implementation was reviewed and found FAILED.\n\n"
+                f"Reviewer feedback:\n{issues}\n\n"
+                f"Please fix the issues and try again. Read each affected file first, make the targeted changes, "
                 f"run tests to verify, commit the fix, and report the commit hash."
             )
-            impl_worker_id = await self.pool.spawn(
-                prompt=retry_prompt,
-                role="coder",
-                tools=self._get_coder_tools(),
-                description=f"Fix retry {attempt + 1}/{self.max_retries}",
-            )
+            self.pool.send_message(impl_worker_id, retry_prompt)
 
         return ReviewResult(passed=False, exhausted=True, issues="max retries exceeded")
 

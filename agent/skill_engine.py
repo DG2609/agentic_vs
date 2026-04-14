@@ -43,7 +43,7 @@ class SkillMeta:
     description: str = ""
     model: str = ""          # suggested model override
     subtask: bool = False    # designed to run as a background subtask
-    tools: dict = field(default_factory=dict)   # optional tool restrictions (future)
+    tools: "list | dict" = field(default_factory=list)   # optional tool allowlist or restrictions
     version: str = ""
     source_file: str = ""    # absolute path to .md file
     trusted: bool = False    # True = skill explicitly declares it uses shell commands
@@ -80,7 +80,7 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 
 
 def _simple_yaml(text: str) -> dict:
-    """Parse a minimal YAML subset: scalars, booleans, nested dicts."""
+    """Parse a minimal YAML subset: scalars, booleans, nested dicts, and inline lists."""
     result: dict = {}
     lines = text.splitlines()
     i = 0
@@ -98,19 +98,35 @@ def _simple_yaml(text: str) -> dict:
             rest = rest.strip()
 
             if not rest:
-                # Possible nested mapping block
+                # Possible nested mapping block or block list (- item)
                 nested: dict = {}
+                block_list: list = []
                 i += 1
-                while i < len(lines) and lines[i].startswith("  "):
-                    nline = lines[i].strip()
-                    if ":" in nline:
-                        nk, _, nv = nline.partition(":")
+                while i < len(lines) and (lines[i].startswith("  ") or lines[i].startswith("- ")):
+                    nline = lines[i]
+                    if nline.lstrip().startswith("- "):
+                        # Block-sequence item
+                        block_list.append(_coerce(nline.lstrip()[2:].strip()))
+                    elif ":" in nline:
+                        nline_s = nline.strip()
+                        nk, _, nv = nline_s.partition(":")
                         nested[nk.strip()] = _coerce(nv.strip())
                     i += 1
-                result[key] = nested
+                if block_list:
+                    result[key] = block_list
+                elif nested:
+                    result[key] = nested
+                else:
+                    result[key] = None
                 continue
             else:
-                result[key] = _coerce(rest)
+                # Inline list: [a, b, c]
+                if rest.startswith("[") and rest.endswith("]"):
+                    inner = rest[1:-1]
+                    items = [_coerce(s.strip().strip('"').strip("'")) for s in inner.split(",") if s.strip()]
+                    result[key] = items
+                else:
+                    result[key] = _coerce(rest)
 
         i += 1
     return result
@@ -248,7 +264,7 @@ def discover_skills() -> list[Skill]:
                     description=str(meta_dict.get("description", "")),
                     model=str(meta_dict.get("model", "")),
                     subtask=bool(meta_dict.get("subtask", False)),
-                    tools=meta_dict.get("tools", {}) or {},
+                    tools=meta_dict.get("tools") or [],
                     version=str(meta_dict.get("version", "")),
                     source_file=str(path),
                     trusted=bool(meta_dict.get("trusted", False)),

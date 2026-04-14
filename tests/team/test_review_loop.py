@@ -46,36 +46,43 @@ async def test_review_loop_failed_then_retried(pool_with_mock):
 
     spawn_roles = []
     call_count = 0
+    sent_messages = []
 
     async def fake_spawn(*a, role="general", **kw):
         nonlocal call_count
         call_count += 1
         spawn_roles.append(role)
         worker_id = f"worker-{call_count}"
-        # Only reviewer spawns get a verdict notification; coder spawns don't
-        if role == "reviewer":
-            status_word = "FAILED ❌" if call_count == 1 else "PASSED ✅"
-            notif = (
-                "<task-notification>\n"
-                f"<task-id>{worker_id}</task-id>\n"
-                "<status>completed</status>\n"
-                "<summary>done</summary>\n"
-                f"<result>{status_word} some issues.</result>\n"
-                "</task-notification>"
-            )
-            await pool.notification_queue.put(notif)
+        status_word = "FAILED ❌" if call_count == 1 else "PASSED ✅"
+        notif = (
+            "<task-notification>\n"
+            f"<task-id>{worker_id}</task-id>\n"
+            "<status>completed</status>\n"
+            "<summary>done</summary>\n"
+            f"<result>{status_word} some issues.</result>\n"
+            "</task-notification>"
+        )
+        await pool.notification_queue.put(notif)
         return worker_id
 
+    def fake_send_message(worker_id, message):
+        sent_messages.append((worker_id, message))
+        return "ok"
+
     loop = ReviewLoop(pool=pool, max_retries=3)
-    with patch.object(pool, "spawn", side_effect=fake_spawn):
+    with patch.object(pool, "spawn", side_effect=fake_spawn), \
+         patch.object(pool, "send_message", side_effect=fake_send_message):
         result = await loop.trigger_review(
             impl_worker_id="impl-abc",
             changed_files=["src/auth/validate.py"],
         )
     assert result.passed is True
-    # On FAILED review: a fresh coder is spawned, then a new reviewer is spawned
+    # On FAILED review: retry message sent to existing impl worker (no new coder spawn)
     assert spawn_roles.count("reviewer") == 2
-    assert spawn_roles.count("coder") == 1
+    assert spawn_roles.count("coder") == 0
+    assert len(sent_messages) == 1
+    assert sent_messages[0][0] == "impl-abc"
+    assert "FAILED" in sent_messages[0][1]
 
 
 @pytest.mark.asyncio
