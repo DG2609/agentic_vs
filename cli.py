@@ -29,6 +29,7 @@ import config
 from agent.graph import build_graph, ALL_TOOLS
 from agent.hooks import run_lifecycle_hook, LIFECYCLE_HOOKS
 from agent.nodes import get_cache_stats
+from agent.advisor import set_advisor_model, get_advisor_model, run_advisor
 from langgraph.checkpoint.memory import MemorySaver
 try:
     from langgraph.checkpoint.sqlite import SqliteSaver as _SqliteSaver
@@ -516,6 +517,77 @@ async def chat_loop(resume_id: str = None):
                     padding=(0, 1),
                 ))
                 continue
+            elif input_text.strip().startswith("/advisor"):
+                parts = input_text.strip().split(maxsplit=1)
+                if len(parts) == 1 or parts[1].strip() in ("off", "none", ""):
+                    set_advisor_model("")
+                    console.print("[dim]Advisor disabled[/dim]")
+                else:
+                    model_name = parts[1].strip()
+                    set_advisor_model(model_name)
+                    console.print(f"[dim]Advisor model set to: {model_name}[/dim]")
+                continue
+            elif input_text.strip() in ("/help",):
+                help_lines = [
+                    "[bold white]ShadowDev Commands[/bold white]\n",
+                    "  [bold]/plan[/bold]          — enter planner agent mode",
+                    "  [bold]/code[/bold]          — enter coder agent mode",
+                    "  [bold]/doc[/bold]           — enter documentation mode",
+                    "  [bold]/fork [N][/bold]      — fork session at message N (default: now)",
+                    "  [bold]/sessions[/bold]      — list recent sessions",
+                    "  [bold]/usage[/bold]         — show session cost & token usage",
+                    "  [bold]/insights[/bold]      — detailed session analytics",
+                    "  [bold]/verbose[/bold]       — toggle verbose token display",
+                    "  [bold]/advisor <model>[/bold] — enable advisor model (e.g. claude-opus-4-6)",
+                    "  [bold]/advisor off[/bold]   — disable advisor model",
+                    "  [bold]/memory [file][/bold] — open memory dir (or specific file) in $EDITOR",
+                    "  [bold]/help[/bold]          — show this help\n",
+                    "  [bold]Alt+1[/bold]  planner  [bold]Alt+2[/bold]  coder  [bold]Alt+3[/bold]  doc",
+                    "  [bold]Ctrl+C[/bold]  cancel  [bold]Ctrl+C×2[/bold]  exit",
+                ]
+                console.print(Panel(
+                    "\n".join(help_lines),
+                    title="[bold magenta]Help[/bold magenta]",
+                    border_style="magenta",
+                    padding=(0, 2),
+                ))
+                continue
+            elif input_text.strip().startswith("/memory"):
+                import subprocess as _subprocess
+                from pathlib import Path as _Path
+
+                mem_dir = _Path.home() / ".shadowdev" / "memory"
+                if not mem_dir.exists():
+                    mem_dir = _Path(config.WORKSPACE_DIR) / ".shadowdev" / "memory"
+                mem_dir.mkdir(parents=True, exist_ok=True)
+
+                _mem_parts = input_text.strip().split(maxsplit=1)
+                if len(_mem_parts) > 1:
+                    _target = mem_dir / _mem_parts[1].strip()
+                    if not _target.suffix:
+                        _target = _target.with_suffix(".md")
+                else:
+                    _target = mem_dir / "MEMORY.md"
+                    if not _target.exists():
+                        _files = sorted(mem_dir.glob("*.md"))
+                        if _files:
+                            console.print("[bold]Memory files:[/bold]")
+                            for _f in _files:
+                                console.print(f"  {_f.name}")
+                            console.print("\n[dim]Use /memory <filename> to edit a specific file[/dim]")
+                        else:
+                            console.print("[dim]No memory files found. Use memory_save tool to create entries.[/dim]")
+                        continue
+
+                _editor = os.environ.get("EDITOR", os.environ.get("VISUAL", "notepad" if os.name == "nt" else "nano"))
+                try:
+                    _subprocess.run([_editor, str(_target)])
+                    console.print(f"[dim]Edited: {_target.name}[/dim]")
+                except FileNotFoundError:
+                    console.print(f"[yellow]Editor '{_editor}' not found. Set $EDITOR env var.[/yellow]")
+                except Exception as _e:
+                    console.print(f"[red]Failed to open editor: {_e}[/red]")
+                continue
             elif input_text.startswith('/plan'):
                 active_agent_override = "planner"
                 input_text = input_text[5:].strip()
@@ -543,8 +615,18 @@ async def chat_loop(resume_id: str = None):
                     input_text = modified
 
             _run_start = time.monotonic()
-            await run_agent(input_text, thread_id, active_agent_override, _session_stats)
+            _last_ai_response = await run_agent(input_text, thread_id, active_agent_override, _session_stats)
             _run_elapsed = time.monotonic() - _run_start
+
+            # ── Model Advisor ────────────────────────────────
+            _advisor = get_advisor_model() or config.ADVISOR_MODEL
+            if _advisor and input_text and _last_ai_response:
+                try:
+                    _critique = await run_advisor(input_text, _last_ai_response, _advisor)
+                    if _critique:
+                        console.print(f"\n[dim]💡 Advisor ({_advisor}): {_critique}[/dim]")
+                except Exception:
+                    pass
 
             # ── Desktop notification for long runs ───────────
             if getattr(config, "NOTIFY_ON_COMPLETE", True) and _run_elapsed > 10:
@@ -810,6 +892,8 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                 _session_stats["cost"] = sv.get("session_cost", _session_stats["cost"])
         except Exception:
             pass
+
+    return buffer
 
 
 if __name__ == "__main__":

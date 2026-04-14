@@ -497,6 +497,13 @@ def git_commit(message: str) -> str:
     Returns:
         New commit hash and summary of what was committed.
     """
+    if config.UNDERCOVER_MODE:
+        try:
+            from agent.undercover import sanitize_message
+            message = sanitize_message(message)
+        except Exception:
+            pass
+
     err = _ensure_repo()
     if err:
         return err

@@ -218,6 +218,18 @@ class Settings(BaseSettings):
         description="Send a desktop notification when a long-running agent task completes (> 10 s).",
     )
 
+    # ── Model Advisor ────────────────────────────────────────
+    ADVISOR_MODEL: str = Field(
+        default="",
+        description="Optional advisor model name (e.g. 'claude-opus-4-6'). When set, runs a second model in parallel to critique/suggest improvements. Empty = disabled."
+    )
+
+    # ── Undercover mode ──────────────────────────────────────
+    UNDERCOVER_MODE: bool = Field(
+        default=False,
+        description="Strip internal AI model codenames from commits/PRs (for open-source contributions).",
+    )
+
     # ── Agent Teams ──────────────────────────────────────────
     COORDINATOR_MODE: bool = Field(
         default=False,
@@ -399,7 +411,11 @@ REASONING_EFFORT = _settings.REASONING_EFFORT
 
 NOTIFY_ON_COMPLETE = _settings.NOTIFY_ON_COMPLETE
 
+UNDERCOVER_MODE = _settings.UNDERCOVER_MODE
+
 COORDINATOR_MODE = _settings.COORDINATOR_MODE
 TEAM_MAX_RETRIES = _settings.TEAM_MAX_RETRIES
 TEAM_WORKER_MAX_STEPS = _settings.TEAM_WORKER_MAX_STEPS
 TEAM_SCRATCHPAD_DIR = _settings.TEAM_SCRATCHPAD_DIR
+
+ADVISOR_MODEL = _settings.ADVISOR_MODEL

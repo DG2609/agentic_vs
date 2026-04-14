@@ -11,7 +11,13 @@
       "WebFetch(domain:gist.github.com)",
       "Bash(mkdir:*)",
       "WebFetch(domain:github.com)",
-      "WebFetch(domain:developers.openai.com)"
+      "WebFetch(domain:developers.openai.com)",
+      "Bash(cat D:/agentic/claude-code-leak_ref/src/coordinator/*.ts)",
+      "Bash(cat D:/agentic/claude-code-leak_ref/src/buddy/*.ts)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(cat)",
+      "Read(//tmp/**)"
     ]
   }
 }
