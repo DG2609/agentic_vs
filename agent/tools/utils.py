@@ -2,7 +2,7 @@
 Shared utilities for agent tools.
 
 Centralizes:
-- Path resolution with sandboxing (security)
+- Path resolution with sandboxing (security) with symlink cycle detection
 - Ignore dir/file constants (DRY)
 """
 import logging
@@ -33,12 +33,32 @@ BINARY_EXT = frozenset({
 
 # ── Path resolution with sandboxing ─────────────────────────
 
+def _detect_symlink_cycle(p: str, max_depth: int = 40) -> bool:
+    """Return True if following symlinks from *p* leads to a cycle.
+
+    Walks the symlink chain and checks for repeated real targets.
+    Stops after max_depth hops to guard against infinite chains.
+    """
+    seen: set[str] = set()
+    current = p
+    for _ in range(max_depth):
+        if not os.path.islink(current):
+            return False  # not a symlink — no cycle
+        target = os.path.realpath(current)
+        if target in seen:
+            return True  # cycle detected
+        seen.add(target)
+        current = target
+    return True  # exceeded max depth — treat as cycle
+
+
 def resolve_path(p: str, workspace: str = None) -> str:
     """Resolve a tool path safely within the workspace boundary.
 
     - Relative paths are joined with workspace.
     - Absolute paths are allowed ONLY if they fall within the workspace.
     - Symlinks are resolved to prevent escaping via symlinks.
+    - Symlink cycles are detected and rejected (prevents infinite loops).
 
     Args:
         p: The path from the tool argument (relative or absolute).
@@ -48,14 +68,23 @@ def resolve_path(p: str, workspace: str = None) -> str:
         Resolved absolute path.
 
     Raises:
-        ValueError: If the resolved path is outside the workspace.
+        ValueError: If the resolved path is outside the workspace or a symlink cycle.
     """
     ws = os.path.realpath(workspace or config.WORKSPACE_DIR)
 
     if os.path.isabs(p):
-        resolved = os.path.realpath(p)
+        raw = p
     else:
-        resolved = os.path.realpath(os.path.join(ws, p))
+        raw = os.path.join(ws, p)
+
+    # Symlink cycle detection before resolving
+    if _detect_symlink_cycle(raw):
+        raise ValueError(
+            f"Access denied: path '{p}' contains a symlink cycle — "
+            "possible infinite loop or malicious redirect"
+        )
+
+    resolved = os.path.realpath(raw)
 
     # Security: ensure path is within workspace
     if not resolved.startswith(ws + os.sep) and resolved != ws:

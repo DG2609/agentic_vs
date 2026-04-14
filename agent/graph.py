@@ -76,6 +76,8 @@ from agent.tools.cron import cron_create, cron_list, cron_delete
 from agent.tools.tool_search import tool_search, tool_list, register_tools
 from agent.tools.config_tool import config_get, config_set, config_list
 from agent.tools.brief import brief
+from agent.tools.agent_summary import agent_summary
+from agent.tools.diagnostics import diagnostics
 from agent.team.tools import TEAM_TOOLS
 from agent.team.coordinator import is_coordinator_mode, get_coordinator_system_prompt
 from agent.tools.github import (
@@ -137,6 +139,8 @@ _CORE_TOOLS = [
     tool_search, tool_list,
     config_get, config_set, config_list,
     brief,
+    agent_summary,
+    diagnostics,
     *_mcp_extra_tools,
 ]
 _all_core_names = {t.name for t in _CORE_TOOLS}
@@ -190,6 +194,8 @@ PLANNER_TOOLS = [
     config_get, config_list,
     # Context brief
     brief,
+    # Agent state + diagnostics
+    agent_summary, diagnostics,
     # Agent Teams — coordinator tools (coordinator prompt activates their full use)
     *TEAM_TOOLS,
     # Context Hub — curated API docs (68+ services)
