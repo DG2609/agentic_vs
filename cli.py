@@ -542,7 +542,19 @@ async def chat_loop(resume_id: str = None):
                 if modified:
                     input_text = modified
 
+            _run_start = time.monotonic()
             await run_agent(input_text, thread_id, active_agent_override, _session_stats)
+            _run_elapsed = time.monotonic() - _run_start
+
+            # ── Desktop notification for long runs ───────────
+            if getattr(config, "NOTIFY_ON_COMPLETE", True) and _run_elapsed > 10:
+                try:
+                    from agent.notifications import notify
+                    _turns = _session_stats.get("turns", 0) if _session_stats else 0
+                    _tokens = _session_stats.get("tokens", 0) if _session_stats else 0
+                    notify("ShadowDev", f"Task complete — {_turns} turns, {_tokens} tokens")
+                except Exception:
+                    pass
 
             # ── Verbose token usage ──────────────────────────
             if _verbose and _session_stats is not None:

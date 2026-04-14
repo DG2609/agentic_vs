@@ -4,6 +4,7 @@ Tools: persistent memory — save, search, list, delete cross-session knowledge.
 Uses SQLite (data/memory.db) for persistence. No embedding required —
 search is done via full-text LIKE matching on key, value, and tags.
 """
+import datetime
 import json
 import logging
 import os
@@ -12,6 +13,8 @@ import threading
 import time
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
+
+from agent.tools.truncation import truncate_output
 
 import config
 from models.tool_schemas import MemorySaveArgs, MemorySearchArgs, MemoryDeleteArgs, MemoryListArgs
@@ -319,6 +322,65 @@ def memory_delete(key: str) -> str:
         return f"⚠️ No memory entry found with key '{key}'"
     except Exception as e:
         return f"❌ Error deleting memory: {e}"
+
+
+# ── Stats + Batch Search ──────────────────────────────────────
+
+@tool
+def memory_stats() -> str:
+    """Return statistics about the memory database: entry count, DB size, oldest/newest entries."""
+    with _lock:
+        conn = _get_conn()
+        try:
+            count = conn.execute("SELECT COUNT(*) FROM memory").fetchone()[0]
+            oldest = conn.execute("SELECT MIN(created_at) FROM memory").fetchone()[0]
+            newest = conn.execute("SELECT MAX(created_at) FROM memory").fetchone()[0]
+            # DB file size
+            db_path = conn.execute("PRAGMA database_list").fetchone()[2]
+            size_bytes = os.path.getsize(db_path) if db_path and os.path.exists(db_path) else 0
+            size_kb = size_bytes / 1024
+
+            lines = [
+                "Memory database stats:",
+                f"  Entries: {count}",
+                f"  DB size: {size_kb:.1f} KB",
+            ]
+            if oldest:
+                lines.append(f"  Oldest entry: {datetime.datetime.fromtimestamp(oldest).strftime('%Y-%m-%d')}")
+            if newest:
+                lines.append(f"  Newest entry: {datetime.datetime.fromtimestamp(newest).strftime('%Y-%m-%d')}")
+            return "\n".join(lines)
+        finally:
+            conn.close()
+
+
+class BatchMemorySearchArgs(BaseModel):
+    queries: list[str] = Field(description="List of search queries to run in parallel.")
+    k_per_query: int = Field(default=3, ge=1, le=10, description="Results per query.")
+
+
+@tool(args_schema=BatchMemorySearchArgs)
+def batch_memory_search(queries: list[str], k_per_query: int = 3) -> str:
+    """Search memory with multiple queries and return merged, deduplicated results.
+
+    Runs each query against the memory database independently and combines the
+    results. Useful for retrieving context across several related topics at once.
+
+    Args:
+        queries: List of search queries (up to 10).
+        k_per_query: Number of results to return per query (1-10).
+
+    Returns:
+        Combined results for all queries, labelled by query.
+    """
+    results = []
+    for query in queries[:10]:  # cap at 10 queries
+        try:
+            raw = memory_search.invoke({"query": query, "n_results": k_per_query})
+            results.append(f"[Query: {query}]\n{raw}")
+        except Exception as e:
+            results.append(f"[Query: {query}] Error: {e}")
+    return truncate_output("\n\n".join(results))
 
 
 # ── Helpers ───────────────────────────────────────────────────

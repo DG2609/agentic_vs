@@ -212,6 +212,12 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Notifications ────────────────────────────────────────
+    NOTIFY_ON_COMPLETE: bool = Field(
+        default=True,
+        description="Send a desktop notification when a long-running agent task completes (> 10 s).",
+    )
+
     # ── Agent Teams ──────────────────────────────────────────
     COORDINATOR_MODE: bool = Field(
         default=False,
@@ -390,6 +396,8 @@ RULES_FILENAMES = _settings.RULES_FILENAMES
 THEME = _settings.THEME
 
 REASONING_EFFORT = _settings.REASONING_EFFORT
+
+NOTIFY_ON_COMPLETE = _settings.NOTIFY_ON_COMPLETE
 
 COORDINATOR_MODE = _settings.COORDINATOR_MODE
 TEAM_MAX_RETRIES = _settings.TEAM_MAX_RETRIES

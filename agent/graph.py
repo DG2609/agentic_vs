@@ -47,7 +47,7 @@ from agent.tools.lsp import (
 )
 from agent.tools.lsp_tools import lsp_go_to_definition, lsp_find_references
 from agent.tools.handoff import handoff_to_coder, handoff_to_planner
-from agent.tools.communication import reply_to_user
+from agent.tools.communication import reply_to_user, request_user_input
 from agent.subagents import task_explore, task_explore_parallel, task_general, task_review
 from agent.tools.todo import todo_read, todo_write
 from agent.tools.plan import plan_enter, plan_exit
@@ -62,7 +62,7 @@ from agent.tools.git import (
     git_push, git_pull, git_fetch, git_merge,
 )
 from agent.tools.test_runner import run_tests
-from agent.tools.memory import memory_save, memory_search, memory_list, memory_delete, memory_export, memory_import
+from agent.tools.memory import memory_save, memory_search, memory_list, memory_delete, memory_export, memory_import, memory_stats, batch_memory_search
 from agent.tools.code_quality import code_quality
 from agent.tools.dep_graph import dep_graph
 from agent.tools.context_build import context_build
@@ -110,7 +110,7 @@ _CORE_TOOLS = [
     lsp_go_to_definition, lsp_find_references,
     lsp_workspace_symbols, lsp_go_to_implementation,
     lsp_call_hierarchy_prepare, lsp_incoming_calls, lsp_outgoing_calls,
-    handoff_to_coder, handoff_to_planner, reply_to_user,
+    handoff_to_coder, handoff_to_planner, reply_to_user, request_user_input,
     task_explore, task_explore_parallel, task_general, task_review,
     todo_read, todo_write, plan_enter, plan_exit, question,
     git_status, git_diff, git_log, git_show, git_blame,
@@ -118,6 +118,7 @@ _CORE_TOOLS = [
     git_push, git_pull, git_fetch, git_merge,
     run_tests,
     memory_save, memory_search, memory_list, memory_delete, memory_export, memory_import,
+    memory_stats, batch_memory_search,
     code_quality, dep_graph, context_build,
     skill_invoke, skill_list, skill_create, hub_search, skill_install, skill_remove,
     github_list_issues, github_list_prs, github_get_pr,
@@ -160,8 +161,9 @@ PLANNER_TOOLS = [
     git_status, git_diff, git_log, git_show, git_blame,
     # Memory (cross-session knowledge)
     memory_save, memory_search, memory_list, memory_delete, memory_export, memory_import,
+    memory_stats, batch_memory_search,
     # Agent coordination
-    handoff_to_coder, reply_to_user, task_explore, task_explore_parallel,
+    handoff_to_coder, reply_to_user, request_user_input, task_explore, task_explore_parallel,
     todo_read, todo_write, plan_enter, plan_exit, question,
     # Skill system (markdown workflow skills + hub discovery)
     skill_invoke, skill_list, hub_search,

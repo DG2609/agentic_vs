@@ -864,6 +864,7 @@ class ShadowDevTUI(App):
         current_agent = active_mode
         self.total_turns += 1
         sb.turns = self.total_turns
+        _tui_run_start = time.time()
 
         # Mark agent as "thinking" (no tool/response yet)
         self._agent_status = "thinking"
@@ -1056,6 +1057,15 @@ class ShadowDevTUI(App):
                     chat.write(Markdown(_preprocess_markdown(clean)))
 
             self.notify("Task complete", severity="information")
+
+            # Desktop notification for long-running tasks
+            _tui_elapsed = time.time() - _tui_run_start
+            if getattr(config, "NOTIFY_ON_COMPLETE", True) and _tui_elapsed > 10:
+                try:
+                    from agent.notifications import notify as _desktop_notify
+                    _desktop_notify("ShadowDev", f"Task complete — {self.total_turns} turns, {self.total_tokens} tokens")
+                except Exception:
+                    pass
 
         except Exception as e:
             err_msg = str(e)

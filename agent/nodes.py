@@ -150,6 +150,53 @@ DOOM_LOOP_MAX = 3  # max identical consecutive tool calls before breaking
 _prompt_cache_breaks: int = 0
 _last_cache_break_tokens: int = 0
 
+# ── Session memory extraction ──────────────────────────────────
+_SESSION_MEMORY_INTERVAL = int(os.environ.get("SHADOWDEV_SESSION_MEMORY_INTERVAL", "20"))
+_session_memory_turn: int = 0  # module-level counter — turns since last extraction
+
+
+async def _extract_session_memory(messages: list, workspace: str) -> None:
+    """Background extraction of session memory — runs as fire-and-forget."""
+    import asyncio
+    from pathlib import Path
+    from langchain_core.messages import HumanMessage as _HM, SystemMessage as _SM
+
+    try:
+        recent = messages[-40:]
+        conversation = "\n".join(
+            f"{m.__class__.__name__}: {str(getattr(m, 'content', ''))[:500]}"
+            for m in recent
+            if hasattr(m, "content") and getattr(m, "content", "")
+        )
+
+        extraction_prompt = (
+            "Extract key information from this conversation excerpt into a concise session memory.\n\n"
+            "Format:\n"
+            "## Key Discoveries\n- ...\n\n"
+            "## Files Changed\n- ...\n\n"
+            "## Decisions Made\n- ...\n\n"
+            "## Current Focus\n...\n\n"
+            f"Conversation:\n{conversation[:8000]}"
+        )
+
+        # Use fast LLM directly — no tool loop needed
+        llm = _create_llm(streaming=False, temperature=0.1, fast=True)
+        response = await asyncio.wait_for(
+            llm.ainvoke([_SM(content="You are a concise technical summarizer."), _HM(content=extraction_prompt)]),
+            timeout=30.0,
+        )
+        summary = response.content if hasattr(response, "content") else str(response)
+
+        mem_dir = Path(workspace or ".") / ".shadowdev"
+        mem_dir.mkdir(exist_ok=True)
+        (mem_dir / "session-memory.md").write_text(
+            f"# Session Memory\n_Updated automatically_\n\n{summary}",
+            encoding="utf-8",
+        )
+        logger.info("Session memory extracted to .shadowdev/session-memory.md")
+    except Exception as e:
+        logger.debug("Session memory extraction failed: %s", e)
+
 
 def get_cache_stats() -> dict:
     """Return prompt cache break statistics for the current session."""
@@ -900,6 +947,19 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     # Clear injected notifications to prevent replay on the next turn
     if injected_notifications:
         result["team_notifications"] = []
+
+    # ── Session memory extraction (fire-and-forget every N turns) ──
+    global _session_memory_turn
+    _session_memory_turn += 1
+    if _session_memory_turn % _SESSION_MEMORY_INTERVAL == 0:
+        import asyncio
+        try:
+            asyncio.ensure_future(_extract_session_memory(
+                list(state.messages),
+                state.workspace or config.WORKSPACE_DIR or ".",
+            ))
+        except Exception:
+            pass  # extraction must never crash the agent
 
     return result
 

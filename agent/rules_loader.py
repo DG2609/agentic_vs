@@ -128,6 +128,16 @@ def load_project_rules(workspace: str = "") -> str:
     if glossary:
         combined += f"\n\n{glossary}"
 
+    # Append session memory if present — not cached so it's always fresh
+    session_mem = cwd / ".shadowdev" / "session-memory.md"
+    if session_mem.exists():
+        try:
+            content = session_mem.read_text(encoding="utf-8").strip()
+            if content:
+                combined += f"\n\n{content}"
+        except OSError:
+            pass
+
     return combined
 
 
