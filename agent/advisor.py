@@ -6,6 +6,16 @@ import asyncio
 import logging
 from typing import Optional
 
+import config
+try:
+    from langchain_anthropic import ChatAnthropic
+except ImportError:
+    ChatAnthropic = None  # type: ignore
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    ChatOpenAI = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 _advisor_model: str = ""  # current advisor model name (empty = disabled)
@@ -27,12 +37,12 @@ def get_advisor_model() -> str:
 async def run_advisor(user_prompt: str, main_response: str, advisor_model: str) -> Optional[str]:
     """Run the advisor model to critique the main response. Returns critique or None on failure."""
     try:
-        import config
         from langchain_core.messages import HumanMessage, SystemMessage
 
         # Build advisor LLM — use same provider but different model
         if config.LLM_PROVIDER == "anthropic":
-            from langchain_anthropic import ChatAnthropic
+            if ChatAnthropic is None:
+                return None
             llm = ChatAnthropic(
                 model=advisor_model,
                 api_key=config.ANTHROPIC_API_KEY,
@@ -40,7 +50,8 @@ async def run_advisor(user_prompt: str, main_response: str, advisor_model: str) 
                 temperature=0.3,
             )
         elif config.LLM_PROVIDER == "openai":
-            from langchain_openai import ChatOpenAI
+            if ChatOpenAI is None:
+                return None
             llm = ChatOpenAI(
                 model=advisor_model,
                 api_key=config.OPENAI_API_KEY,
