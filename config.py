@@ -230,6 +230,12 @@ class Settings(BaseSettings):
         description="Strip internal AI model codenames from commits/PRs (for open-source contributions).",
     )
 
+    # ── Auto Dream ───────────────────────────────────────────
+    AUTO_DREAM_ENABLED: bool = Field(
+        default=True,
+        description="Enable background memory consolidation every AUTO_DREAM_INTERVAL turns.",
+    )
+
     # ── Agent Teams ──────────────────────────────────────────
     COORDINATOR_MODE: bool = Field(
         default=False,
@@ -412,6 +418,8 @@ REASONING_EFFORT = _settings.REASONING_EFFORT
 NOTIFY_ON_COMPLETE = _settings.NOTIFY_ON_COMPLETE
 
 UNDERCOVER_MODE = _settings.UNDERCOVER_MODE
+
+AUTO_DREAM_ENABLED = _settings.AUTO_DREAM_ENABLED
 
 COORDINATOR_MODE = _settings.COORDINATOR_MODE
 TEAM_MAX_RETRIES = _settings.TEAM_MAX_RETRIES

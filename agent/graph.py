@@ -72,6 +72,8 @@ from agent.tools.image_input import image_input
 from agent.tools.snapshot_tools import snapshot_list, snapshot_revert, snapshot_info
 from agent.tools.context_hub import chub_search, chub_get, chub_annotate, chub_feedback
 from agent.tools.session_tools import fork_session
+from agent.tools.cron import cron_create, cron_list, cron_delete
+from agent.tools.tool_search import tool_search, tool_list, register_tools
 from agent.team.tools import TEAM_TOOLS
 from agent.team.coordinator import is_coordinator_mode, get_coordinator_system_prompt
 from agent.tools.github import (
@@ -129,9 +131,12 @@ _CORE_TOOLS = [
     snapshot_list, snapshot_revert, snapshot_info,
     chub_search, chub_get, chub_annotate, chub_feedback,
     fork_session,
+    cron_create, cron_list, cron_delete,
+    tool_search, tool_list,
     *_mcp_extra_tools,
 ]
 _all_core_names = {t.name for t in _CORE_TOOLS}
+register_tools(_CORE_TOOLS)  # populate tool_search registry
 _planner_skills, _coder_skills = _load_skills(existing_names=_all_core_names)
 
 # ── Load pip-installed plugins (entry_points group "shadowdev.tools") ──────
@@ -173,6 +178,10 @@ PLANNER_TOOLS = [
     snapshot_list, snapshot_revert, snapshot_info,
     # Session management
     fork_session,
+    # Scheduling
+    cron_create, cron_list, cron_delete,
+    # Tool discovery
+    tool_search, tool_list,
     # Agent Teams — coordinator tools (coordinator prompt activates their full use)
     *TEAM_TOOLS,
     # Context Hub — curated API docs (68+ services)

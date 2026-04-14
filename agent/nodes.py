@@ -961,6 +961,14 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
         except Exception:
             pass  # extraction must never crash the agent
 
+    # ── Auto Dream memory consolidation (fire-and-forget every 50 turns) ──
+    try:
+        from agent.auto_dream import run_auto_dream
+        import asyncio as _aio
+        _aio.ensure_future(run_auto_dream(list(state.messages), _session_memory_turn, llm))
+    except Exception:
+        pass  # auto dream must never crash the agent
+
     return result
 
 

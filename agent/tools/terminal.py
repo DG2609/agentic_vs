@@ -78,6 +78,82 @@ _RE_QUOTE_COMMENT = re.compile(r"""['"]\s*#\s*[^'"]*['"]""")
 _RE_NORMALIZE_WS  = re.compile(r"\s+")
 _UNICODE_SEPARATORS = '\u00a0\u200b\u2028\u2029\ufeff'
 
+# ── sed -i safety (CC: sedValidation) ────────────────────────────────────────
+# `sed -i` behaves differently on GNU (Linux) vs BSD (macOS):
+#   Linux:   sed -i 's/foo/bar/' file      (no backup needed, OK on Linux)
+#   macOS:   sed -i '' 's/foo/bar/' file   (requires empty-string suffix)
+#   Both:    sed -i.bak 's/foo/bar/' file  (backup extension, always safe)
+#
+# We warn when sed -i is followed directly by a sed script (quote char after -i SPACE)
+# without the BSD-portable '' or "" empty-string suffix.
+#   -i 's/...'  → warn (Linux-only, silent file corruption on macOS)
+#   -i ''       → OK  (BSD portable)
+#   -i ""       → OK  (BSD portable)
+#   -i.bak      → OK  (extension backup)
+_RE_SED_I_WITH_SCRIPT  = re.compile(r'''-i\s+[\'"]''')          # -i followed by quote
+_RE_SED_I_EMPTY_BACKUP = re.compile(r'''-i\s+[\'\"]{2}[\s]''')  # -i '' <space> (BSD safe)
+
+# ── Destructive command soft-warning patterns ─────────────────────────────────
+# These are warned (not blocked) — user may genuinely want them.
+_DESTRUCTIVE_WARN_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'\brm\s+(-\w*\s+)*-\w*r\w*\s'), "recursive rm (data loss risk)"),
+    (re.compile(r'\btruncate\s+'), "truncate (data loss risk)"),
+    (re.compile(r'\bshred\s+'), "shred (permanent deletion)"),
+    (re.compile(r'\bwipe\s+'), "wipe (permanent deletion)"),
+    (re.compile(r'\bgit\s+reset\s+--hard\b'), "git reset --hard (discards uncommitted changes)"),
+    (re.compile(r'\bgit\s+clean\s+(-\w*f\w*|-f)'), "git clean -f (permanent file deletion)"),
+    (re.compile(r'\bgit\s+push\s+.*--force\b'), "git push --force (rewrites remote history)"),
+    (re.compile(r'\bdrop\s+table\b', re.IGNORECASE), "DROP TABLE (permanent data loss)"),
+    (re.compile(r'\bdelete\s+from\b', re.IGNORECASE), "DELETE FROM (may delete all rows)"),
+]
+
+
+def _check_sed_safety(command: str) -> str | None:
+    """Warn if `sed -i` is used without a platform-portable backup argument.
+
+    Returns a warning string, or None if safe.
+    GNU sed and BSD/macOS sed have incompatible -i semantics:
+    - GNU:  sed -i 's/foo/bar/' file         (Linux-only, fails on macOS)
+    - BSD:  sed -i '' 's/foo/bar/' file      (portable, requires '' suffix)
+    - Both: sed -i.bak 's/foo/bar/' file     (extension backup, always safe)
+    """
+    if "sed" not in command or "-i" not in command:
+        return None
+    # Has `-i <quote>` pattern (script immediately after -i, no backup)
+    has_script_after_i = bool(_RE_SED_I_WITH_SCRIPT.search(command))
+    # Has `-i '' ` or `-i "" ` (empty backup = BSD portable)
+    has_empty_backup = bool(_RE_SED_I_EMPTY_BACKUP.search(command))
+    # Has -i.ext (extension backup = always safe)
+    has_ext_backup = bool(re.search(r'-i\.\w+', command))
+
+    if has_script_after_i and not has_empty_backup and not has_ext_backup:
+        return (
+            "⚠️  Warning: `sed -i` without a backup suffix is not portable (fails on macOS/BSD). "
+            "Consider `sed -i ''` for BSD compatibility, or use the file_edit tool for "
+            "reliable cross-platform in-place editing."
+        )
+    return None
+
+
+def _check_destructive(command: str) -> str | None:
+    """Return a warning string if the command matches known destructive patterns.
+
+    Does NOT block — the warning is prepended to the command output.
+    """
+    normalized = _RE_NORMALIZE_WS.sub(" ", command.strip()).lower()
+    warnings = []
+    for pattern, label in _DESTRUCTIVE_WARN_PATTERNS:
+        if pattern.search(normalized):
+            warnings.append(label)
+    sed_warn = _check_sed_safety(command)
+    if sed_warn:
+        warnings.append("sed -i portability issue")
+
+    if warnings:
+        joined = ", ".join(warnings)
+        return f"⚠️  Destructive operation warning: {joined}. Proceeding..."
+    return None
+
 
 def _validate_command(command: str) -> str | None:
     """Validate *command* against dangerous patterns.
@@ -255,6 +331,9 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
     if err:
         return err
 
+    # Warn (but allow) destructive commands — prepend warning to output.
+    _destruction_warning = _check_destructive(command)
+
     # Sandbox cwd to workspace boundary
     if cwd:
         safe_cwd = resolve_path_safe(cwd)
@@ -322,6 +401,8 @@ def terminal_exec(command: str, cwd: str = "", timeout: int = 0) -> str:
             sections.append("(no output)")
 
         raw = "\n\n".join(sections)
+        if _destruction_warning:
+            raw = _destruction_warning + "\n\n" + raw
 
         # Universal truncation — saves full output to disk if truncated
         return truncate_output(raw)
