@@ -166,3 +166,49 @@ def test_sanitize_multiple_codenames_all_removed():
     assert "claude-haiku" not in result
     assert "Tengu" not in result
     assert "anthropic.com" not in result
+
+
+# ---------------------------------------------------------------------------
+# New codenames added in Sprint 13
+# ---------------------------------------------------------------------------
+
+def test_sanitize_removes_capybara_codename():
+    from agent.undercover import sanitize_message
+    msg = "Model Capybara was deployed"
+    result = sanitize_message(msg)
+    assert "Capybara" not in result
+
+
+def test_sanitize_removes_orion_codename():
+    from agent.undercover import sanitize_message
+    msg = "Orion handled the request"
+    result = sanitize_message(msg)
+    assert "Orion" not in result
+
+
+def test_sanitize_removes_openai_attribution():
+    from agent.undercover import sanitize_message
+    msg = "Co-Authored-By: GPT <noreply@openai.com>"
+    result = sanitize_message(msg)
+    assert "openai.com" not in result
+
+
+def test_sanitize_removes_gpt_model_names():
+    from agent.undercover import sanitize_message
+    msg = "Built with gpt-4o for code generation"
+    result = sanitize_message(msg)
+    assert "gpt-4o" not in result
+
+
+def test_sanitize_removes_generated_with_claude_code():
+    from agent.undercover import sanitize_message
+    msg = "🤖 Generated with [Claude Code](https://claude.ai)"
+    result = sanitize_message(msg)
+    assert "Claude Code" not in result
+
+
+def test_sanitize_removes_powered_by_claude():
+    from agent.undercover import sanitize_message
+    msg = "Powered by Claude for AI assistance"
+    result = sanitize_message(msg)
+    assert "Powered by Claude" not in result

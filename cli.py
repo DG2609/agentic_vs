@@ -541,6 +541,8 @@ async def chat_loop(resume_id: str = None):
                     "  [bold]/advisor <model>[/bold] — enable advisor model (e.g. claude-opus-4-6)",
                     "  [bold]/advisor off[/bold]   — disable advisor model",
                     "  [bold]/memory [file][/bold] — open memory dir (or specific file) in $EDITOR",
+                    "  [bold]/doctor[/bold]        — run system health diagnostics",
+                    "  [bold]/config [KEY [VAL]][/bold] — view or update config settings",
                     "  [bold]/help[/bold]          — show this help\n",
                     "  [bold]Alt+1[/bold]  planner  [bold]Alt+2[/bold]  coder  [bold]Alt+3[/bold]  doc",
                     "  [bold]Ctrl+C[/bold]  cancel  [bold]Ctrl+C×2[/bold]  exit",
@@ -587,6 +589,46 @@ async def chat_loop(resume_id: str = None):
                     console.print(f"[yellow]Editor '{_editor}' not found. Set $EDITOR env var.[/yellow]")
                 except Exception as _e:
                     console.print(f"[red]Failed to open editor: {_e}[/red]")
+                continue
+            elif input_text.strip() == "/doctor":
+                # System health check — run diagnostics tool inline
+                console.print("[dim]Running diagnostics...[/dim]")
+                try:
+                    from agent.tools.diagnostics import diagnostics as _diag
+                    _diag_result = _diag.invoke({})
+                    console.print(Panel(
+                        _diag_result,
+                        title="[bold cyan]ShadowDev Doctor[/bold cyan]",
+                        border_style="cyan",
+                        padding=(0, 1),
+                    ))
+                except Exception as _e:
+                    console.print(f"[red]Diagnostics failed: {_e}[/red]")
+                continue
+            elif input_text.strip().startswith("/config"):
+                _cfg_parts = input_text.strip().split(maxsplit=2)
+                try:
+                    if len(_cfg_parts) == 1:
+                        # /config — list all settings
+                        from agent.tools.config_tool import config_list as _cfg_list
+                        _cfg_out = _cfg_list.invoke({})
+                        console.print(Panel(
+                            _cfg_out,
+                            title="[bold cyan]Configuration[/bold cyan]",
+                            border_style="cyan",
+                            padding=(0, 1),
+                        ))
+                    elif len(_cfg_parts) == 2:
+                        # /config KEY — get one setting
+                        from agent.tools.config_tool import config_get as _cfg_get
+                        console.print(_cfg_get.invoke({"key": _cfg_parts[1]}))
+                    else:
+                        # /config KEY VALUE — set a setting
+                        from agent.tools.config_tool import config_set as _cfg_set
+                        _result = _cfg_set.invoke({"key": _cfg_parts[1], "value": _cfg_parts[2]})
+                        console.print(f"[dim]{_result}[/dim]")
+                except Exception as _e:
+                    console.print(f"[red]Config error: {_e}[/red]")
                 continue
             elif input_text.startswith('/plan'):
                 active_agent_override = "planner"

@@ -30,7 +30,8 @@ class TodoWriteArgs(BaseModel):
         description=(
             "Full list of todo items. Each item must have: "
             "'id' (int), 'content' (str), 'status' (pending|in_progress|completed|cancelled), "
-            "'priority' (high|medium|low, optional). "
+            "'priority' (high|medium|low, optional), "
+            "'depends_on' (list[int], optional — IDs of tasks that must complete first). "
             "Pass the COMPLETE list — it replaces the current list."
         )
     )
@@ -59,11 +60,16 @@ def todo_read() -> str:
         "completed": "✅",
         "cancelled": "❌",
     }
+    # Build completed set for dependency blocking check
+    completed_ids = {t["id"] for t in todos if t.get("status") == "completed"}
     for t in todos:
         icon = status_icons.get(t.get("status", "pending"), "⬜")
         priority = t.get("priority", "")
         pri_label = f" [{priority.upper()}]" if priority else ""
-        lines.append(f"{icon} {t['id']}. {t['content']}{pri_label}")
+        deps = t.get("depends_on", [])
+        blocked = [d for d in deps if d not in completed_ids] if deps else []
+        blocked_label = f" [blocked by: {', '.join(str(b) for b in blocked)}]" if blocked else ""
+        lines.append(f"{icon} {t['id']}. {t['content']}{pri_label}{blocked_label}")
 
     summary = f"Total: {len(todos)} | "
     for s in ["pending", "in_progress", "completed", "cancelled"]:
@@ -97,6 +103,7 @@ def todo_write(todos: list[dict]) -> str:
     """
     # Validate
     valid_statuses = {"pending", "in_progress", "completed", "cancelled"}
+    all_ids = {t.get("id") for t in todos if "id" in t}
     for t in todos:
         if "id" not in t or "content" not in t:
             return "Error: Each todo must have 'id' and 'content' fields."
@@ -104,6 +111,15 @@ def todo_write(todos: list[dict]) -> str:
             t["status"] = "pending"
         if t["status"] not in valid_statuses:
             return f"Error: Invalid status '{t['status']}'. Use: {valid_statuses}"
+        # Validate depends_on references
+        deps = t.get("depends_on", [])
+        if deps:
+            invalid_deps = [d for d in deps if d not in all_ids]
+            if invalid_deps:
+                return (
+                    f"Error: Task {t['id']} depends_on unknown IDs: {invalid_deps}. "
+                    f"All task IDs: {sorted(all_ids)}"
+                )
 
     _set_todos(todos)
     logger.info(f"Todo list updated: {len(todos)} items")

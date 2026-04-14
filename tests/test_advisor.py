@@ -157,3 +157,42 @@ async def test_run_advisor_timeout_returns_none():
         with patch("agent.advisor.ChatAnthropic", return_value=mock_llm):
             result = await run_advisor("q", "a", "claude-opus-4-6")
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Additional: todo dependency tracking
+# ---------------------------------------------------------------------------
+
+def test_todo_write_with_depends_on():
+    from agent.tools.todo import todo_write, todo_read, _set_todos
+    _set_todos([])
+    result = todo_write.invoke({"todos": [
+        {"id": 1, "content": "Step A", "status": "pending"},
+        {"id": 2, "content": "Step B", "status": "pending", "depends_on": [1]},
+    ]})
+    assert "updated" in result.lower()
+    read_result = todo_read.invoke({})
+    assert "blocked by: 1" in read_result
+    _set_todos([])
+
+
+def test_todo_write_invalid_depends_on_rejected():
+    from agent.tools.todo import todo_write, _set_todos
+    _set_todos([])
+    result = todo_write.invoke({"todos": [
+        {"id": 1, "content": "task", "status": "pending", "depends_on": [99]},
+    ]})
+    assert "Error" in result or "unknown" in result.lower()
+    _set_todos([])
+
+
+def test_todo_blocked_resolves_when_dependency_complete():
+    from agent.tools.todo import todo_write, todo_read, _set_todos
+    _set_todos([])
+    todo_write.invoke({"todos": [
+        {"id": 1, "content": "Step A", "status": "completed"},
+        {"id": 2, "content": "Step B", "status": "pending", "depends_on": [1]},
+    ]})
+    read_result = todo_read.invoke({})
+    assert "blocked by" not in read_result
+    _set_todos([])
