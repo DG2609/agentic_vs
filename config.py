@@ -44,9 +44,19 @@ class Settings(BaseSettings):
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # ── LLM Provider ────────────────────────────────────────
-    LLM_PROVIDER: Literal["ollama", "openai", "anthropic", "google", "groq", "azure"] = Field(
+    LLM_PROVIDER: Literal[
+        "ollama", "openai", "anthropic", "google", "groq", "azure",
+        "vllm", "llamacpp", "lmstudio", "openai_compatible",
+        "vertex_ai", "github_copilot", "aws_bedrock", "mistral",
+        "together", "fireworks", "deepseek", "perplexity", "xai",
+    ] = Field(
         default="ollama",
-        description="LLM backend: 'ollama', 'openai', 'anthropic', 'google', 'groq', or 'azure'."
+        description=(
+            "LLM backend. Local: 'ollama', 'vllm', 'llamacpp', 'lmstudio', 'openai_compatible'. "
+            "Cloud: 'openai', 'anthropic', 'google', 'groq', 'azure', 'vertex_ai', "
+            "'github_copilot', 'aws_bedrock', 'mistral', 'together', 'fireworks', "
+            "'deepseek', 'perplexity', 'xai'."
+        ),
     )
 
     # Vector backend for semantic search
@@ -87,6 +97,79 @@ class Settings(BaseSettings):
     AZURE_OPENAI_MODEL: str = "gpt-4o"
     AZURE_OPENAI_FAST_MODEL: str = ""
     AZURE_OPENAI_API_VERSION: str = "2024-10-21"
+
+    # vLLM (OpenAI-compatible server)
+    VLLM_BASE_URL: str = Field(default="http://localhost:8000/v1", description="vLLM server URL (OpenAI-compatible)")
+    VLLM_MODEL: str = Field(default="", description="Model name as served by vLLM (e.g. 'meta-llama/Llama-3.1-8B-Instruct')")
+    VLLM_FAST_MODEL: str = Field(default="", description="Fast/cheap vLLM model for subagents")
+    VLLM_API_KEY: str = Field(default="EMPTY", description="vLLM API key (usually 'EMPTY' for local deployments)")
+
+    # llama.cpp server (OpenAI-compatible)
+    LLAMACPP_BASE_URL: str = Field(default="http://localhost:8080/v1", description="llama.cpp server URL")
+    LLAMACPP_MODEL: str = Field(default="local-model", description="Model name for llama.cpp (usually 'local-model' or leave empty)")
+    LLAMACPP_FAST_MODEL: str = Field(default="", description="Fast model for subagents")
+    LLAMACPP_API_KEY: str = Field(default="EMPTY", description="llama.cpp API key (usually 'EMPTY')")
+
+    # LM Studio (OpenAI-compatible)
+    LMSTUDIO_BASE_URL: str = Field(default="http://localhost:1234/v1", description="LM Studio local server URL")
+    LMSTUDIO_MODEL: str = Field(default="", description="Model ID loaded in LM Studio (leave empty to use first available)")
+    LMSTUDIO_FAST_MODEL: str = Field(default="", description="Fast model for subagents")
+    LMSTUDIO_API_KEY: str = Field(default="lm-studio", description="LM Studio API key (default 'lm-studio')")
+
+    # Generic OpenAI-compatible endpoint
+    OPENAI_COMPATIBLE_BASE_URL: str = Field(default="http://localhost:8000/v1", description="Any OpenAI-compatible API base URL")
+    OPENAI_COMPATIBLE_MODEL: str = Field(default="", description="Model name for the OpenAI-compatible endpoint")
+    OPENAI_COMPATIBLE_FAST_MODEL: str = Field(default="", description="Fast model")
+    OPENAI_COMPATIBLE_API_KEY: str = Field(default="EMPTY", description="API key for the OpenAI-compatible endpoint")
+    OPENAI_COMPATIBLE_NAME: str = Field(default="custom", description="Human-readable name for this provider (e.g. 'Together AI', 'DeepInfra')")
+
+    # Google Cloud Vertex AI
+    VERTEX_AI_PROJECT: str = Field(default="", description="GCP project ID for Vertex AI (uses ADC if empty)")
+    VERTEX_AI_LOCATION: str = Field(default="us-central1", description="GCP region for Vertex AI")
+    VERTEX_AI_MODEL: str = Field(default="gemini-2.0-flash-001", description="Vertex AI model name")
+    VERTEX_AI_FAST_MODEL: str = Field(default="", description="Fast/cheap Vertex AI model for subagents")
+
+    # GitHub Copilot (OpenAI-compatible)
+    GITHUB_COPILOT_API_KEY: str = Field(default="", description="GitHub Copilot API token (OAuth Bearer or PAT)")
+    GITHUB_COPILOT_MODEL: str = Field(default="gpt-4o", description="Model via GitHub Copilot API")
+    GITHUB_COPILOT_FAST_MODEL: str = Field(default="gpt-4o-mini", description="Fast model for subagents")
+
+    # AWS Bedrock
+    AWS_REGION: str = Field(default="us-east-1", description="AWS region for Bedrock API calls")
+    AWS_ACCESS_KEY_ID: str = Field(default="", description="AWS Access Key ID (uses IAM role/env if empty)")
+    AWS_SECRET_ACCESS_KEY: str = Field(default="", description="AWS Secret Access Key")
+    BEDROCK_MODEL: str = Field(default="anthropic.claude-3-5-sonnet-20241022-v2:0", description="AWS Bedrock model ID")
+    BEDROCK_FAST_MODEL: str = Field(default="", description="Fast Bedrock model for subagents")
+
+    # Mistral AI
+    MISTRAL_API_KEY: str = Field(default="", description="Mistral AI API key")
+    MISTRAL_MODEL: str = Field(default="mistral-large-latest", description="Mistral AI model name")
+    MISTRAL_FAST_MODEL: str = Field(default="mistral-small-latest", description="Fast/cheap Mistral model")
+
+    # Together AI (OpenAI-compatible)
+    TOGETHER_API_KEY: str = Field(default="", description="Together AI API key")
+    TOGETHER_MODEL: str = Field(default="meta-llama/Llama-3.3-70B-Instruct-Turbo", description="Together AI model name")
+    TOGETHER_FAST_MODEL: str = Field(default="", description="Fast Together AI model for subagents")
+
+    # Fireworks AI (OpenAI-compatible)
+    FIREWORKS_API_KEY: str = Field(default="", description="Fireworks AI API key")
+    FIREWORKS_MODEL: str = Field(default="accounts/fireworks/models/llama-v3p3-70b-instruct", description="Fireworks AI model name")
+    FIREWORKS_FAST_MODEL: str = Field(default="", description="Fast Fireworks AI model for subagents")
+
+    # DeepSeek (OpenAI-compatible)
+    DEEPSEEK_API_KEY: str = Field(default="", description="DeepSeek API key")
+    DEEPSEEK_MODEL: str = Field(default="deepseek-chat", description="DeepSeek model (deepseek-chat or deepseek-reasoner)")
+    DEEPSEEK_FAST_MODEL: str = Field(default="", description="Fast DeepSeek model for subagents")
+
+    # Perplexity AI (OpenAI-compatible)
+    PERPLEXITY_API_KEY: str = Field(default="", description="Perplexity AI API key")
+    PERPLEXITY_MODEL: str = Field(default="sonar-pro", description="Perplexity AI model name")
+    PERPLEXITY_FAST_MODEL: str = Field(default="sonar", description="Fast/cheap Perplexity model")
+
+    # xAI / Grok (OpenAI-compatible)
+    XAI_API_KEY: str = Field(default="", description="xAI API key for Grok models")
+    XAI_MODEL: str = Field(default="grok-3", description="xAI Grok model name")
+    XAI_FAST_MODEL: str = Field(default="grok-3-mini", description="Fast xAI model for subagents")
 
     # ── Server ──────────────────────────────────────────────
     HOST: str = "0.0.0.0"
@@ -139,6 +222,47 @@ class Settings(BaseSettings):
         "gemini-2.0-flash": 1048576,
         "gemini-2.5-pro": 1048576,
         "llama-3.3-70b-versatile": 131072,
+        "meta-llama/Llama-3.1-8B-Instruct": 131072,
+        "meta-llama/Llama-3.1-70B-Instruct": 131072,
+        "meta-llama/Llama-3.3-70B-Instruct": 131072,
+        "mistralai/Mistral-7B-Instruct-v0.3": 32768,
+        "mistralai/Mixtral-8x7B-Instruct-v0.1": 32768,
+        "microsoft/Phi-3.5-mini-instruct": 128000,
+        "Qwen/Qwen2.5-7B-Instruct": 32768,
+        "Qwen/Qwen2.5-72B-Instruct": 32768,
+        "local-model": 32768,
+        # Vertex AI
+        "gemini-2.0-flash-001": 1048576,
+        "gemini-1.5-pro": 2097152,
+        "gemini-1.5-flash": 1048576,
+        # AWS Bedrock
+        "anthropic.claude-3-5-sonnet-20241022-v2:0": 200000,
+        "anthropic.claude-3-5-haiku-20241022-v1:0": 200000,
+        "anthropic.claude-3-haiku-20240307-v1:0": 200000,
+        "amazon.titan-text-premier-v1:0": 32768,
+        "meta.llama3-70b-instruct-v1:0": 128000,
+        # Mistral AI
+        "mistral-large-latest": 131072,
+        "mistral-small-latest": 32768,
+        "codestral-latest": 32768,
+        # Together AI
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo": 131072,
+        "meta-llama/Llama-3.1-405B-Instruct-Turbo": 130815,
+        "Qwen/Qwen2.5-72B-Instruct-Turbo": 32768,
+        # Fireworks AI
+        "accounts/fireworks/models/llama-v3p3-70b-instruct": 131072,
+        "accounts/fireworks/models/deepseek-r1": 163840,
+        # DeepSeek
+        "deepseek-chat": 64000,
+        "deepseek-reasoner": 64000,
+        # Perplexity
+        "sonar-pro": 200000,
+        "sonar": 127072,
+        "sonar-reasoning-pro": 128000,
+        # xAI / Grok
+        "grok-3": 131072,
+        "grok-3-mini": 131072,
+        "grok-2": 131072,
     })
 
     # ── Container Sandbox ─────────────────────────────────────
@@ -376,6 +500,27 @@ AZURE_OPENAI_MODEL = _settings.AZURE_OPENAI_MODEL
 AZURE_OPENAI_FAST_MODEL = _settings.AZURE_OPENAI_FAST_MODEL
 AZURE_OPENAI_API_VERSION = _settings.AZURE_OPENAI_API_VERSION
 
+VLLM_BASE_URL = _settings.VLLM_BASE_URL
+VLLM_MODEL = _settings.VLLM_MODEL
+VLLM_FAST_MODEL = _settings.VLLM_FAST_MODEL
+VLLM_API_KEY = _settings.VLLM_API_KEY
+
+LLAMACPP_BASE_URL = _settings.LLAMACPP_BASE_URL
+LLAMACPP_MODEL = _settings.LLAMACPP_MODEL
+LLAMACPP_FAST_MODEL = _settings.LLAMACPP_FAST_MODEL
+LLAMACPP_API_KEY = _settings.LLAMACPP_API_KEY
+
+LMSTUDIO_BASE_URL = _settings.LMSTUDIO_BASE_URL
+LMSTUDIO_MODEL = _settings.LMSTUDIO_MODEL
+LMSTUDIO_FAST_MODEL = _settings.LMSTUDIO_FAST_MODEL
+LMSTUDIO_API_KEY = _settings.LMSTUDIO_API_KEY
+
+OPENAI_COMPATIBLE_BASE_URL = _settings.OPENAI_COMPATIBLE_BASE_URL
+OPENAI_COMPATIBLE_MODEL = _settings.OPENAI_COMPATIBLE_MODEL
+OPENAI_COMPATIBLE_FAST_MODEL = _settings.OPENAI_COMPATIBLE_FAST_MODEL
+OPENAI_COMPATIBLE_API_KEY = _settings.OPENAI_COMPATIBLE_API_KEY
+OPENAI_COMPATIBLE_NAME = _settings.OPENAI_COMPATIBLE_NAME
+
 HOST = _settings.HOST
 PORT = _settings.PORT
 API_KEY = _settings.API_KEY
@@ -427,3 +572,51 @@ TEAM_WORKER_MAX_STEPS = _settings.TEAM_WORKER_MAX_STEPS
 TEAM_SCRATCHPAD_DIR = _settings.TEAM_SCRATCHPAD_DIR
 
 ADVISOR_MODEL = _settings.ADVISOR_MODEL
+
+# Vertex AI
+VERTEX_AI_PROJECT = _settings.VERTEX_AI_PROJECT
+VERTEX_AI_LOCATION = _settings.VERTEX_AI_LOCATION
+VERTEX_AI_MODEL = _settings.VERTEX_AI_MODEL
+VERTEX_AI_FAST_MODEL = _settings.VERTEX_AI_FAST_MODEL
+
+# GitHub Copilot
+GITHUB_COPILOT_API_KEY = _settings.GITHUB_COPILOT_API_KEY
+GITHUB_COPILOT_MODEL = _settings.GITHUB_COPILOT_MODEL
+GITHUB_COPILOT_FAST_MODEL = _settings.GITHUB_COPILOT_FAST_MODEL
+
+# AWS Bedrock
+AWS_REGION = _settings.AWS_REGION
+AWS_ACCESS_KEY_ID = _settings.AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY = _settings.AWS_SECRET_ACCESS_KEY
+BEDROCK_MODEL = _settings.BEDROCK_MODEL
+BEDROCK_FAST_MODEL = _settings.BEDROCK_FAST_MODEL
+
+# Mistral AI
+MISTRAL_API_KEY = _settings.MISTRAL_API_KEY
+MISTRAL_MODEL = _settings.MISTRAL_MODEL
+MISTRAL_FAST_MODEL = _settings.MISTRAL_FAST_MODEL
+
+# Together AI
+TOGETHER_API_KEY = _settings.TOGETHER_API_KEY
+TOGETHER_MODEL = _settings.TOGETHER_MODEL
+TOGETHER_FAST_MODEL = _settings.TOGETHER_FAST_MODEL
+
+# Fireworks AI
+FIREWORKS_API_KEY = _settings.FIREWORKS_API_KEY
+FIREWORKS_MODEL = _settings.FIREWORKS_MODEL
+FIREWORKS_FAST_MODEL = _settings.FIREWORKS_FAST_MODEL
+
+# DeepSeek
+DEEPSEEK_API_KEY = _settings.DEEPSEEK_API_KEY
+DEEPSEEK_MODEL = _settings.DEEPSEEK_MODEL
+DEEPSEEK_FAST_MODEL = _settings.DEEPSEEK_FAST_MODEL
+
+# Perplexity AI
+PERPLEXITY_API_KEY = _settings.PERPLEXITY_API_KEY
+PERPLEXITY_MODEL = _settings.PERPLEXITY_MODEL
+PERPLEXITY_FAST_MODEL = _settings.PERPLEXITY_FAST_MODEL
+
+# xAI / Grok
+XAI_API_KEY = _settings.XAI_API_KEY
+XAI_MODEL = _settings.XAI_MODEL
+XAI_FAST_MODEL = _settings.XAI_FAST_MODEL

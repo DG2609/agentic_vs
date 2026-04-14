@@ -109,6 +109,10 @@ def _get_active_model() -> tuple[str, str]:
         "google": config.GOOGLE_MODEL,
         "groq": config.GROQ_MODEL,
         "azure": config.AZURE_OPENAI_MODEL,
+        "vllm": getattr(config, "VLLM_MODEL", ""),
+        "llamacpp": getattr(config, "LLAMACPP_MODEL", ""),
+        "lmstudio": getattr(config, "LMSTUDIO_MODEL", ""),
+        "openai_compatible": getattr(config, "OPENAI_COMPATIBLE_MODEL", ""),
     }
     return model_map.get(provider, "unknown"), provider
 
@@ -409,6 +413,10 @@ async def chat_loop(resume_id: str = None):
     tool_count = len(ALL_TOOLS)
     workspace = os.path.basename(os.path.abspath(config.WORKSPACE_DIR))
 
+    _local_providers = {"ollama", "vllm", "llamacpp", "lmstudio", "openai_compatible"}
+    _is_local = provider in _local_providers
+    _provider_indicator = "[green]● LOCAL[/green]" if _is_local else "[blue]● CLOUD[/blue]"
+
     console.print()
     console.print(
         f"  [bold magenta]ShadowDev[/bold magenta]"
@@ -416,8 +424,34 @@ async def chat_loop(resume_id: str = None):
         f"  [dim]│[/dim]  [bold]{tool_count}[/bold] tools"
         f"  [dim]│[/dim]  [dim]/help for commands[/dim]"
     )
+    console.print(f"  {_provider_indicator} [dim]{provider}[/dim] · [bold]{model}[/bold]")
     console.print(f"  [dim]Workspace: {workspace}/  │  Session: {thread_id[:8]}…[/dim]")
     console.print(f"  [dim]{'─' * 60}[/dim]")
+
+    # Connectivity check for local providers
+    if _is_local:
+        _url_map = {
+            "ollama": getattr(config, "OLLAMA_BASE_URL", "http://localhost:11434"),
+            "vllm": getattr(config, "VLLM_BASE_URL", "http://localhost:8000/v1"),
+            "llamacpp": getattr(config, "LLAMACPP_BASE_URL", "http://localhost:8080/v1"),
+            "lmstudio": getattr(config, "LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
+            "openai_compatible": getattr(config, "OPENAI_COMPATIBLE_BASE_URL", "http://localhost:8000/v1"),
+        }
+        _server_url = _url_map.get(provider, "")
+        if _server_url:
+            try:
+                import urllib.request, urllib.error
+                _check_url = _server_url if provider != "ollama" else _server_url + "/api/tags"
+                urllib.request.urlopen(_check_url.replace("/v1", ""), timeout=1)
+            except Exception:
+                console.print(f"  [yellow]⚠  {provider} server not reachable at {_server_url}[/yellow]")
+                _start_hint = (
+                    "ollama serve" if provider == "ollama"
+                    else f"python -m {provider}" if provider == "vllm"
+                    else f"{provider} server"
+                )
+                console.print(f"  [dim]Start with: {_start_hint}[/dim]")
+
     console.print()
 
     while True:
@@ -541,6 +575,8 @@ async def chat_loop(resume_id: str = None):
                     "  [bold]/advisor <model>[/bold] — enable advisor model (e.g. claude-opus-4-6)",
                     "  [bold]/advisor off[/bold]   — disable advisor model",
                     "  [bold]/memory [file][/bold] — open memory dir (or specific file) in $EDITOR",
+                    "  [bold]/provider [name][/bold] — show or switch LLM provider",
+                    "  [bold]/model [name][/bold]   — show or change the current model",
                     "  [bold]/doctor[/bold]        — run system health diagnostics",
                     "  [bold]/config [KEY [VAL]][/bold] — view or update config settings",
                     "  [bold]/help[/bold]          — show this help\n",
@@ -629,6 +665,61 @@ async def chat_loop(resume_id: str = None):
                         console.print(f"[dim]{_result}[/dim]")
                 except Exception as _e:
                     console.print(f"[red]Config error: {_e}[/red]")
+                continue
+            elif input_text.strip().startswith("/model"):
+                parts = input_text.strip().split(maxsplit=1)
+                if len(parts) == 1:
+                    # show current model
+                    import config as _cfg
+                    console.print(f"[dim]Current model: {_get_active_model()[0]} (provider: {_cfg.LLM_PROVIDER})[/dim]")
+                else:
+                    new_model = parts[1].strip()
+                    import config as _cfg
+                    # Update the model for the current provider
+                    provider = _cfg.LLM_PROVIDER
+                    model_attr_map = {
+                        "openai": "OPENAI_MODEL", "anthropic": "ANTHROPIC_MODEL",
+                        "google": "GOOGLE_MODEL", "groq": "GROQ_MODEL",
+                        "ollama": "OLLAMA_MODEL", "azure": "AZURE_OPENAI_MODEL",
+                        "vllm": "VLLM_MODEL", "llamacpp": "LLAMACPP_MODEL",
+                        "lmstudio": "LMSTUDIO_MODEL", "openai_compatible": "OPENAI_COMPATIBLE_MODEL",
+                    }
+                    attr = model_attr_map.get(provider)
+                    if attr:
+                        old = getattr(_cfg, attr, "")
+                        setattr(_cfg, attr, new_model)
+                        console.print(f"[dim]Model: {old!r} → {new_model!r} (session only)[/dim]")
+                    else:
+                        console.print(f"[red]Unknown provider: {provider}[/red]")
+                continue
+            elif input_text.strip().startswith("/provider"):
+                parts = input_text.strip().split(maxsplit=1)
+                if len(parts) == 1:
+                    import config as _cfg
+                    providers = ["ollama", "openai", "anthropic", "google", "groq", "azure",
+                                 "vllm", "llamacpp", "lmstudio", "openai_compatible"]
+                    lines = ["[bold]Available providers:[/bold]"]
+                    for p in providers:
+                        marker = "[bold green]●[/bold green]" if p == _cfg.LLM_PROVIDER else "[dim]○[/dim]"
+                        local = " [dim](local)[/dim]" if p in {"ollama", "vllm", "llamacpp", "lmstudio"} else ""
+                        lines.append(f"  {marker} {p}{local}")
+                    console.print("\n".join(lines))
+                    console.print(f"\n[dim]Current: {_cfg.LLM_PROVIDER}. Use /provider <name> to switch.[/dim]")
+                else:
+                    new_provider = parts[1].strip().lower()
+                    valid = {"ollama", "openai", "anthropic", "google", "groq", "azure",
+                             "vllm", "llamacpp", "lmstudio", "openai_compatible"}
+                    if new_provider not in valid:
+                        console.print(f"[red]Unknown provider '{new_provider}'. Valid: {', '.join(sorted(valid))}[/red]")
+                    else:
+                        import config as _cfg
+                        old = _cfg.LLM_PROVIDER
+                        _cfg.LLM_PROVIDER = new_provider
+                        # Rebuild graph with new provider
+                        from agent.graph import build_graph as _bg
+                        from langgraph.checkpoint.memory import MemorySaver as _MS
+                        graph = _bg(checkpointer=_MS())
+                        console.print(f"[dim]Provider: {old!r} → {new_provider!r}. Graph rebuilt.[/dim]")
                 continue
             elif input_text.startswith('/plan'):
                 active_agent_override = "planner"

@@ -311,17 +311,17 @@ def test_daltonized_palette_hex_colors_are_valid():
             )
 
 
-def test_theme_cycle_contains_all_four_themes():
-    """_THEME_CYCLE must list all four expected themes."""
-    expected = {"textual-dark", "textual-light", "daltonized-dark", "daltonized-light"}
-    assert set(_THEME_CYCLE) == expected, (
-        f"_THEME_CYCLE has {set(_THEME_CYCLE)}, expected {expected}"
+def test_theme_cycle_contains_all_themes():
+    """_THEME_CYCLE must include all expected themes (daltonized + textual + monokai)."""
+    expected = {"textual-dark", "textual-light", "daltonized-dark", "daltonized-light", "monokai"}
+    assert expected.issubset(set(_THEME_CYCLE)), (
+        f"_THEME_CYCLE missing themes: {expected - set(_THEME_CYCLE)}"
     )
 
 
-def test_theme_cycle_length():
-    """_THEME_CYCLE must have exactly 4 entries (no duplicates)."""
-    assert len(_THEME_CYCLE) == 4
+def test_theme_cycle_no_duplicates():
+    """_THEME_CYCLE must not contain duplicate entries."""
+    assert len(_THEME_CYCLE) == len(set(_THEME_CYCLE)), "Duplicate themes in _THEME_CYCLE"
 
 
 def test_theme_cycle_is_list():

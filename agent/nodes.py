@@ -282,6 +282,150 @@ def _create_llm(streaming: bool = True, temperature: float = 0.3, fast: bool = F
             temperature=temperature,
             streaming=streaming,
         )
+    elif provider == "vllm":
+        from langchain_openai import ChatOpenAI
+        model = (config.VLLM_FAST_MODEL or config.VLLM_MODEL) if fast else config.VLLM_MODEL
+        if not model:
+            model = "default"
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.VLLM_API_KEY,
+            openai_api_base=config.VLLM_BASE_URL,
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "llamacpp":
+        from langchain_openai import ChatOpenAI
+        model = (config.LLAMACPP_FAST_MODEL or config.LLAMACPP_MODEL) if fast else config.LLAMACPP_MODEL
+        if not model:
+            model = "local-model"
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.LLAMACPP_API_KEY,
+            openai_api_base=config.LLAMACPP_BASE_URL,
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "lmstudio":
+        from langchain_openai import ChatOpenAI
+        model = (config.LMSTUDIO_FAST_MODEL or config.LMSTUDIO_MODEL) if fast else config.LMSTUDIO_MODEL
+        if not model:
+            model = "local-model"
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.LMSTUDIO_API_KEY,
+            openai_api_base=config.LMSTUDIO_BASE_URL,
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "openai_compatible":
+        from langchain_openai import ChatOpenAI
+        model = (config.OPENAI_COMPATIBLE_FAST_MODEL or config.OPENAI_COMPATIBLE_MODEL) if fast else config.OPENAI_COMPATIBLE_MODEL
+        if not model:
+            model = "default"
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.OPENAI_COMPATIBLE_API_KEY,
+            openai_api_base=config.OPENAI_COMPATIBLE_BASE_URL,
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "vertex_ai":
+        from langchain_google_vertexai import ChatVertexAI
+        model = (config.VERTEX_AI_FAST_MODEL or config.VERTEX_AI_MODEL) if fast else config.VERTEX_AI_MODEL
+        kwargs: dict = dict(model_name=model, location=config.VERTEX_AI_LOCATION,
+                            temperature=temperature, streaming=streaming)
+        if config.VERTEX_AI_PROJECT:
+            kwargs["project"] = config.VERTEX_AI_PROJECT
+        return ChatVertexAI(**kwargs)
+    elif provider == "github_copilot":
+        from langchain_openai import ChatOpenAI
+        model = (config.GITHUB_COPILOT_FAST_MODEL or config.GITHUB_COPILOT_MODEL) if fast else config.GITHUB_COPILOT_MODEL
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.GITHUB_COPILOT_API_KEY,
+            openai_api_base="https://api.githubcopilot.com",
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "aws_bedrock":
+        from langchain_aws import ChatBedrock
+        model = (config.BEDROCK_FAST_MODEL or config.BEDROCK_MODEL) if fast else config.BEDROCK_MODEL
+        bedrock_kwargs: dict = dict(
+            model_id=model,
+            region_name=config.AWS_REGION,
+            streaming=streaming,
+            model_kwargs={"temperature": temperature},
+        )
+        if config.AWS_ACCESS_KEY_ID and config.AWS_SECRET_ACCESS_KEY:
+            bedrock_kwargs["credentials_profile_name"] = None
+            import boto3
+            bedrock_kwargs["client"] = boto3.client(
+                "bedrock-runtime",
+                region_name=config.AWS_REGION,
+                aws_access_key_id=config.AWS_ACCESS_KEY_ID,
+                aws_secret_access_key=config.AWS_SECRET_ACCESS_KEY,
+            )
+        return ChatBedrock(**bedrock_kwargs)
+    elif provider == "mistral":
+        from langchain_mistralai import ChatMistralAI
+        model = (config.MISTRAL_FAST_MODEL or config.MISTRAL_MODEL) if fast else config.MISTRAL_MODEL
+        return ChatMistralAI(
+            model=model,
+            mistral_api_key=config.MISTRAL_API_KEY,
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "together":
+        from langchain_openai import ChatOpenAI
+        model = (config.TOGETHER_FAST_MODEL or config.TOGETHER_MODEL) if fast else config.TOGETHER_MODEL
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.TOGETHER_API_KEY,
+            openai_api_base="https://api.together.xyz/v1",
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "fireworks":
+        from langchain_openai import ChatOpenAI
+        model = (config.FIREWORKS_FAST_MODEL or config.FIREWORKS_MODEL) if fast else config.FIREWORKS_MODEL
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.FIREWORKS_API_KEY,
+            openai_api_base="https://api.fireworks.ai/inference/v1",
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "deepseek":
+        from langchain_openai import ChatOpenAI
+        model = (config.DEEPSEEK_FAST_MODEL or config.DEEPSEEK_MODEL) if fast else config.DEEPSEEK_MODEL
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.DEEPSEEK_API_KEY,
+            openai_api_base="https://api.deepseek.com/v1",
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "perplexity":
+        from langchain_openai import ChatOpenAI
+        model = (config.PERPLEXITY_FAST_MODEL or config.PERPLEXITY_MODEL) if fast else config.PERPLEXITY_MODEL
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.PERPLEXITY_API_KEY,
+            openai_api_base="https://api.perplexity.ai",
+            temperature=temperature,
+            streaming=streaming,
+        )
+    elif provider == "xai":
+        from langchain_openai import ChatOpenAI
+        model = (config.XAI_FAST_MODEL or config.XAI_MODEL) if fast else config.XAI_MODEL
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=config.XAI_API_KEY,
+            openai_api_base="https://api.x.ai/v1",
+            temperature=temperature,
+            streaming=streaming,
+        )
     else:  # ollama (default)
         from langchain_ollama import ChatOllama
         model = (config.OLLAMA_FAST_MODEL or config.OLLAMA_MODEL) if fast else config.OLLAMA_MODEL

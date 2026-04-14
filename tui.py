@@ -137,8 +137,12 @@ DALTONIZED_PALETTES = {
     },
 }
 
-# Ordered cycle: default dark → default light → daltonized dark → daltonized light
-_THEME_CYCLE = ["textual-dark", "textual-light", "daltonized-dark", "daltonized-light"]
+# Ordered cycle: default dark → monokai → default light → daltonized dark → daltonized light
+_THEME_CYCLE = ["textual-dark", "monokai", "textual-light", "daltonized-dark", "daltonized-light"]
+
+# Provider classification
+_LOCAL_PROVIDERS = {"ollama", "vllm", "llamacpp", "lmstudio", "openai_compatible"}
+_CLOUD_PROVIDERS = {"openai", "anthropic", "google", "groq", "azure"}
 
 
 # ── Helpers ────────────────────────────────────────────────
@@ -183,7 +187,33 @@ def _get_model_name() -> str:
     provider = config.LLM_PROVIDER
     if provider == "ollama":
         return config.OLLAMA_MODEL
-    return getattr(config, f"{provider.upper()}_MODEL", "unknown")
+    # azure uses a different prefix
+    if provider == "azure":
+        return getattr(config, "AZURE_OPENAI_MODEL", "unknown")
+    # local OpenAI-compatible providers — try provider-specific MODEL attr first
+    provider_key = provider.replace("_compatible", "").upper()
+    return getattr(config, f"{provider_key}_MODEL", "unknown")
+
+
+def _get_provider_display() -> tuple[str, str, str]:
+    """Return (dot_char, label, style) for status bar provider indicator.
+
+    Local providers → green dot + "LOCAL"
+    Cloud providers → blue dot + provider name
+    """
+    provider = config.LLM_PROVIDER
+    if provider in _LOCAL_PROVIDERS:
+        return ("●", "LOCAL", "bold green")
+    # cloud: display a short name
+    name_map = {
+        "openai": "openai",
+        "anthropic": "anthropic",
+        "google": "google",
+        "groq": "groq",
+        "azure": "azure",
+    }
+    label = name_map.get(provider, provider)
+    return ("●", label, "bold blue")
 
 
 def _get_workspace() -> str:
@@ -232,7 +262,7 @@ COMMANDS = [
     ("/new", "New session"),
     ("/sessions", "Show session list"),
     ("/help", "Show help"),
-    ("/theme", "Cycle theme: dark → light → daltonized-dark → daltonized-light"),
+    ("/theme", "Cycle theme: dark → monokai → light → daltonized-dark → daltonized-light"),
     ("/compact", "Compact conversation context"),
     ("/exit", "Quit ShadowDev"),
 ]
@@ -390,17 +420,23 @@ class StatusBar(Static):
         else:
             color = AGENT_COLORS.get(self.agent, "white")
             t.append(f" {self.agent.upper()} ", style=f"reverse bold {color}")
-        t.append("  ", style="dim")
-        # Provider + model
-        t.append(f"{config.LLM_PROVIDER.upper()}", style="bold")
-        t.append("/", style="dim")
+        t.append("  ")
+        # Provider indicator: coloured dot + LOCAL or provider name
+        dot, provider_label, dot_style = _get_provider_display()
+        t.append(dot + " ", style=dot_style)
+        t.append(provider_label, style=dot_style)
+        t.append(" · ", style="dim")
+        # Model name
         t.append(f"{_get_model_name()} ", style="bold green")
+        # Connection status indicator
+        if getattr(self, "_conn_failed", False):
+            t.append("⚠ ", style="bold red")
         # Status — compact "∴ Thinking…" or standard "working..."
         if self.busy:
             t.append(f" {self.busy_label} ", style="bold yellow")
         # Tokens
         if self.tokens > 0:
-            t.append(f" {self.tokens:,} tokens", style="dim")
+            t.append(f" {self.tokens:,} tok", style="dim")
         # Turns
         t.append(f"  Turn {self.turns}", style="dim")
         # Cost
@@ -519,6 +555,66 @@ class ToolSidebar(Vertical):
             line = f"  {icon} [{w['role']}] {desc} ({w['status']})"
             style = "magenta" if w["status"] == "running" else "dim"
             log.write(Text(line, style=style))
+
+
+# ── Agent Team Status Panel ────────────────────────────────
+
+class TeamStatusPanel(Static):
+    """Shows active agent team workers. Visible only when COORDINATOR_MODE=True."""
+
+    DEFAULT_CSS = """
+    TeamStatusPanel {
+        height: auto;
+        max-height: 10;
+        background: $surface;
+        border-top: tall $primary-background-darken-2;
+        padding: 0 1;
+        display: none;
+    }
+    TeamStatusPanel.-visible {
+        display: block;
+    }
+    #team-panel-content {
+        height: auto;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="team-panel-content")
+
+    def update_workers(self, workers: list) -> None:
+        """Update with list of worker dicts: {id, role, status, current_task}"""
+        content = self.query_one("#team-panel-content", Static)
+        if not workers:
+            content.update("")
+            self.remove_class("-visible")
+            return
+
+        self.add_class("-visible")
+        icons = {"running": "🔄", "completed": "✅", "failed": "❌", "idle": "⬜", "stopped": "⏹"}
+        lines = ["[bold]Agent Team[/bold]"]
+        for w in workers[:8]:
+            icon = icons.get(w.get("status", "idle"), "⬜")
+            role = (w.get("role") or "worker")[:10]
+            task = (w.get("current_task") or w.get("description") or "")[:40]
+            lines.append(f"  {icon} [[bold]{role}[/bold]] [dim]{task}[/dim]")
+        content.update("\n".join(lines))
+
+
+def _render_tool_inline(tool_name: str, status: str, elapsed: float | None = None) -> str:
+    """Return a Rich markup string for an inline tool progress indicator.
+
+    status: 'running' | 'done' | 'error'
+    elapsed: seconds (shown when status is 'done')
+    """
+    icon, base = TOOL_ICONS.get(tool_name, ("⚙", tool_name))
+    if status == "running":
+        return f"[yellow]⚙ {icon} {base} … (running)[/yellow]"
+    elif status == "done":
+        elapsed_str = f" ({_fmt_elapsed(elapsed)})" if elapsed is not None else ""
+        return f"[dim]⚙ {icon} {base} ✓{elapsed_str}[/dim]"
+    else:
+        return f"[red]⚙ {icon} {base} ✗[/red]"
 
 
 # ── Chat Input Widget ──────────────────────────────────────
@@ -645,6 +741,25 @@ class ShadowDevTUI(App):
         height: 1fr;
         content-align: center middle;
     }
+    #team-panel {
+        height: auto;
+        max-height: 10;
+    }
+    """
+
+    # Monokai-inspired CSS variables (applied when monokai theme is active)
+    _MONOKAI_CSS = """
+    Screen {
+        background: #272822;
+        color: #f8f8f2;
+    }
+    $surface: #3e3d32;
+    $primary: #75715e;
+    $primary-background: #272822;
+    $primary-background-darken-1: #1e1f1c;
+    $primary-background-darken-2: #19191a;
+    $accent: #a6e22e;
+    $text-muted: #75715e;
     """
 
     BINDINGS = [
@@ -692,6 +807,7 @@ class ShadowDevTUI(App):
                     id="chat-log", highlight=True, markup=True,
                     wrap=True, max_lines=10000,
                 )
+                yield TeamStatusPanel(id="team-panel")
                 yield ChatInput(id="chat-input")
             yield ToolSidebar(id="sidebar")
         yield Footer()
@@ -706,9 +822,19 @@ class ShadowDevTUI(App):
         sb.session_id = self.thread_id
         sb.agent = self.current_agent
 
+        # Team panel — only show when COORDINATOR_MODE is active
+        team_panel = self.query_one("#team-panel", TeamStatusPanel)
+        if config.COORDINATOR_MODE:
+            team_panel.add_class("-visible")
+        else:
+            team_panel.remove_class("-visible")
+
         # Lifecycle hook
         if LIFECYCLE_HOOKS:
             await run_lifecycle_hook("session_start", {"thread_id": self.thread_id})
+
+        # Provider connection check (async, non-blocking)
+        self.run_worker(self._check_provider_connection(), exclusive=False)
 
         # Notify
         self.notify(f"Session started: {self.thread_id[:8]}...", severity="information")
@@ -813,16 +939,24 @@ class ShadowDevTUI(App):
             except ValueError:
                 idx = 0
             next_theme = _THEME_CYCLE[(idx + 1) % len(_THEME_CYCLE)]
-            # Map daltonized variants onto a Textual base theme for rendering
-            textual_theme = "textual-light" if "light" in next_theme else "textual-dark"
+            # Map logical themes onto Textual built-in themes for rendering
+            if "light" in next_theme:
+                textual_theme = "textual-light"
+            else:
+                textual_theme = "textual-dark"
             self.theme = textual_theme
-            # Persist logical theme name and apply daltonized agent colors if needed
+            # Persist logical theme name and apply palette overrides if needed
             config.THEME = next_theme
             if next_theme in DALTONIZED_PALETTES:
                 palette = DALTONIZED_PALETTES[next_theme]
                 AGENT_COLORS["planner"] = palette["ai"]
                 AGENT_COLORS["coder"] = palette["ai"]
                 AGENT_COLORS["doc"] = palette["tool"]
+            elif next_theme == "monokai":
+                # Warm monokai agent colors
+                AGENT_COLORS["planner"] = "#e6db74"   # monokai yellow
+                AGENT_COLORS["coder"] = "#66d9e8"     # monokai cyan
+                AGENT_COLORS["doc"] = "#a6e22e"       # monokai green
             else:
                 # Restore defaults
                 AGENT_COLORS["planner"] = "#f5c542"
@@ -967,6 +1101,8 @@ class ShadowDevTUI(App):
 
                     label = _tool_label(tool_name, args if isinstance(args, dict) else {})
                     sidebar.log_tool_start(label)
+                    # Inline tool progress in chat
+                    chat.write(Text.from_markup(_render_tool_inline(tool_name, "running")))
                     async with self._state_lock:
                         self.active_tools[run_id] = {
                             "start": time.time(),
@@ -976,6 +1112,8 @@ class ShadowDevTUI(App):
                         }
                     # Refresh the tree view in the sidebar
                     sidebar.refresh_tool_tree(self.active_tools)
+                    # Refresh team panel if coordinator mode active
+                    self._refresh_team_panel()
 
                 # Tool END
                 elif kind == "on_tool_end":
@@ -1009,8 +1147,13 @@ class ShadowDevTUI(App):
                     label = _tool_label(tool_name, a)
 
                     sidebar.log_tool_end(label, elapsed_str)
+                    # Inline tool completion indicator in chat (for non-file/terminal tools)
+                    if tool_name not in ("file_edit", "file_write", "file_edit_batch", "terminal_exec"):
+                        chat.write(Text.from_markup(_render_tool_inline(tool_name, "done", elapsed)))
                     # Refresh tree after tool completes
                     sidebar.refresh_tool_tree(self.active_tools)
+                    # Refresh team panel
+                    self._refresh_team_panel()
 
                     # Track modified files
                     if tool_name in ("file_edit", "file_write", "file_edit_batch"):
@@ -1096,6 +1239,69 @@ class ShadowDevTUI(App):
             if LIFECYCLE_HOOKS:
                 await run_lifecycle_hook("stop", {"thread_id": self.thread_id})
 
+    # ── Provider Connection Check ──────────────────────────
+
+    async def _check_provider_connection(self) -> bool:
+        """Quick connectivity check for local providers; shows a toast if unreachable."""
+        local_providers = {"ollama", "vllm", "llamacpp", "lmstudio", "openai_compatible"}
+        provider = config.LLM_PROVIDER
+        if provider not in local_providers:
+            return True  # cloud providers assumed connected
+
+        url_map = {
+            "ollama": getattr(config, "OLLAMA_BASE_URL", "http://localhost:11434"),
+            "vllm": getattr(config, "VLLM_BASE_URL", "http://localhost:8000/v1"),
+            "llamacpp": getattr(config, "LLAMACPP_BASE_URL", "http://localhost:8080/v1"),
+            "lmstudio": getattr(config, "LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
+            "openai_compatible": getattr(config, "OPENAI_COMPATIBLE_BASE_URL", "http://localhost:8000/v1"),
+        }
+        base_url = url_map.get(provider, "")
+        if not base_url:
+            return True
+
+        try:
+            import urllib.request
+            if provider == "ollama":
+                health_url = base_url.rstrip("/") + "/api/tags"
+            else:
+                health_url = base_url.rstrip("/v1").rstrip("/") + "/health"
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: urllib.request.urlopen(health_url, timeout=2),
+            )
+            return True
+        except Exception:
+            # Update status bar connection flag
+            try:
+                sb = self.query_one("#status-bar", StatusBar)
+                sb._conn_failed = True
+                sb.refresh()
+            except Exception:
+                pass
+            self.notify(
+                f"⚠ {provider} server not reachable at {base_url}. Start the server first.",
+                severity="warning",
+                timeout=8,
+            )
+            return False
+
+    # ── Team Panel Refresh ─────────────────────────────────
+
+    def _refresh_team_panel(self) -> None:
+        """Pull current worker list and update TeamStatusPanel."""
+        if not config.COORDINATOR_MODE:
+            return
+        try:
+            from agent.team.tools import _POOL
+            workers = _POOL.list_workers()
+        except Exception:
+            workers = []
+        try:
+            panel = self.query_one("#team-panel", TeamStatusPanel)
+            panel.update_workers(workers)
+        except Exception:
+            pass
+
     # ── Utilities ──────────────────────────────────────────
 
     def _clean_buffer(self, buffer: str) -> str:
@@ -1125,7 +1331,7 @@ class ShadowDevTUI(App):
 | `/doc <msg>` | Send as Doc agent |
 | `/clear` | Clear chat |
 | `/new` | New session |
-| `/theme` | Cycle theme (dark/light/daltonized-dark/daltonized-light) |
+| `/theme` | Cycle theme (dark/monokai/light/daltonized-dark/daltonized-light) |
 | `/help` | This help |
 | `/exit` | Quit |
 
