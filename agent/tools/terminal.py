@@ -37,6 +37,48 @@ def _safe_env() -> dict:
     return env
 
 
+# ── Pre-compiled regex patterns (compiled once at module load) ───────────────
+# Original 8 patterns — applied to lowercased, whitespace-normalised command
+_DENIED_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"rm\s+(-\w*\s+)*-\w*r\w*f\w*\s+/"),  "rm -rf /"),
+    (re.compile(r"rm\s+(-\w*\s+)*-\w*f\w*r\w*\s+/"),  "rm -rf /"),
+    (re.compile(r"rm\s+(-\w*\s+)*-\w*r\w*f\w*\s+~"),  "rm -rf ~"),
+    (re.compile(r"\bdd\s+if\s*="),                      "dd if="),
+    (re.compile(r"\bmkfs\."),                           "mkfs."),
+    (re.compile(r">\s*/dev/[sn]"),                      "> /dev/"),
+    (re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&"),        "fork bomb"),
+    (re.compile(r"\bchmod\s+.*-[rR]\s+[07]{3}\s+/"),   "chmod nuke"),
+]
+
+# Extended patterns — applied to original (case-sensitive) command
+_RE_IFS            = re.compile(r'\bIFS\s*=')
+_RE_BRACE_SEMI     = re.compile(r'\{[^}]*;[^}]*\}')
+_RE_ZMODLOAD       = re.compile(r'\bzmodload\b')
+_RE_ZSH_EQ        = re.compile(r'(?<![=\w])=\w+')
+_RE_JQ_ENV        = re.compile(r'\bjq\b.*\benv\b')
+_RE_AT_SH         = re.compile(r'@sh')
+_RE_HERE_STR      = re.compile(r'<<<\s*\$')
+_RE_EVAL_VAR      = re.compile(r'\beval\s+["\']?\$')
+_RE_PROC_SUBST    = re.compile(r'<\(|>\(')
+_RE_NULL_BYTE     = re.compile(r'\\x00|\$\'\\000\'')
+_RE_PRINTF_B      = re.compile(r'\bprintf\b.*%b')
+_RE_ARRAY_IDX     = re.compile(r'\[\s*\$\(')
+_RE_ENV_OVERRIDE  = re.compile(r'^[A-Z_]+=\S+\s+\S', re.MULTILINE)
+_RE_GIT_RCE_KEYS  = re.compile(
+    r'git\s+config.*\b(core\.fsmonitor|core\.hooksPath|core\.gitProxy|uploadpack\.packObjectsHook)\b',
+    re.IGNORECASE,
+)
+_RE_GIT_CFG_ENV   = re.compile(r'\bgit\b.*--config-env[\s=]', re.IGNORECASE)
+_RE_CD_GIT        = re.compile(r'\bcd\b.+(?:;|&&|\|\|).+\bgit\b|\bgit\b.+(?:;|&&|\|\|).+\bcd\b')
+_RE_ANSI_C_QUOTE  = re.compile(r"\$'[^']*'|\$\"[^\"]*\"")
+_RE_VAR_PIPE      = re.compile(r'\$\{?\w+\}?\s*\|')
+_RE_VAR_REDIR     = re.compile(r'<\s*\$\{?\w+\}?')
+_RE_PROC_ENVIRON  = re.compile(r'/proc/[0-9a-z_*]+/environ')
+_RE_QUOTE_COMMENT = re.compile(r"""['"]\s*#\s*[^'"]*['"]""")
+_RE_NORMALIZE_WS  = re.compile(r"\s+")
+_UNICODE_SEPARATORS = '\u00a0\u200b\u2028\u2029\ufeff'
+
+
 def _validate_command(command: str) -> str | None:
     """Validate *command* against dangerous patterns.
 
@@ -54,21 +96,11 @@ def _validate_command(command: str) -> str | None:
         )
 
     # Normalize whitespace for case-insensitive legacy checks.
-    normalized_lower = re.sub(r"\s+", " ", command.strip()).lower()
+    normalized_lower = _RE_NORMALIZE_WS.sub(" ", command.strip()).lower()
 
     # ── Original 8 patterns (case-insensitive, whitespace-normalised) ────────
-    _DENIED_PATTERNS = [
-        (r"rm\s+(-\w*\s+)*-\w*r\w*f\w*\s+/",  "rm -rf /"),   # rm -rf / variants
-        (r"rm\s+(-\w*\s+)*-\w*f\w*r\w*\s+/",  "rm -rf /"),   # rm -fr / variants
-        (r"rm\s+(-\w*\s+)*-\w*r\w*f\w*\s+~",  "rm -rf ~"),   # home nuke
-        (r"\bdd\s+if\s*=",                     "dd if="),      # Disk wipe
-        (r"\bmkfs\.",                           "mkfs."),       # Disk format
-        (r">\s*/dev/[sn]",                     "> /dev/"),     # Direct disk write
-        (r":\(\)\s*\{\s*:\s*\|\s*:\s*&",       "fork bomb"),   # Fork bomb
-        (r"\bchmod\s+.*-[rR]\s+[07]{3}\s+/",    "chmod nuke"),  # Permission nuke
-    ]
-    for regex, label in _DENIED_PATTERNS:
-        if re.search(regex, normalized_lower):
+    for pattern, label in _DENIED_PATTERNS:
+        if pattern.search(normalized_lower):
             return _blocked(label)
 
     # ── Extended CC-parity validators ────────────────────────────────────────
@@ -76,120 +108,99 @@ def _validate_command(command: str) -> str | None:
     # case-sensitive constructs (IFS, env-var names, Unicode escapes) are matched
     # correctly.
 
-    # 1. IFS reassignment — can alter word splitting for subsequent commands
-    if re.search(r'\bIFS\s*=', command):
+    # 1. IFS reassignment
+    if _RE_IFS.search(command):
         return _blocked("IFS reassignment detected — may alter word splitting")
 
-    # 2. Brace expansion with embedded semicolons — e.g. {rm,-rf}/
-    if re.search(r'\{[^}]*;[^}]*\}', command):
+    # 2. Brace expansion with embedded semicolons
+    if _RE_BRACE_SEMI.search(command):
         return _blocked("brace expansion with semicolon — possible command injection")
 
-    # 3. Unicode whitespace / zero-width characters used as invisible separators
-    _UNICODE_SEPARATORS = '\u00a0\u200b\u2028\u2029\ufeff'
+    # 3. Unicode whitespace / zero-width characters
     if any(c in command for c in _UNICODE_SEPARATORS):
         return _blocked("Unicode whitespace/zero-width character detected — possible invisible command separator")
 
-    # 4. Zsh zmodload — loads Zsh modules that can bypass shell restrictions
-    if re.search(r'\bzmodload\b', command):
+    # 4. Zsh zmodload
+    if _RE_ZMODLOAD.search(command):
         return _blocked("zmodload detected — may load Zsh modules that bypass restrictions")
 
-    # 5. Zsh =cmd substitution — =ls expands to the full path of 'ls'
-    #    Match a bare =word token (not KEY=value assignment context).
-    if re.search(r'(?<![=\w])=\w+', command):
+    # 5. Zsh =cmd substitution
+    if _RE_ZSH_EQ.search(command):
         return _blocked("Zsh =cmd substitution detected — may expand to unexpected full path")
 
-    # 6. Control characters (excluding tab and newline) embedded in the command
+    # 6. Control characters (excluding tab and newline)
     if any(ord(c) < 32 and c not in '\t\n' for c in command):
         return _blocked("control character in command — possible command injection")
 
-    # 7. jq shell escape — jq's env builtin or @sh format can call out to shell
-    if re.search(r'\bjq\b.*\benv\b', command) or re.search(r'@sh', command):
+    # 7. jq shell escape
+    if _RE_JQ_ENV.search(command) or _RE_AT_SH.search(command):
         return _blocked("jq env/shell escape detected — may execute arbitrary shell code")
 
-    # 8. Unbalanced backtick pairs — odd number of backticks hides subshell injection
+    # 8. Unbalanced backtick pairs
     if command.count('`') % 2 != 0:
         return _blocked("unbalanced backticks — possible hidden command substitution")
 
-    # 9. Here-string with variable expansion — can leak env vars to untrusted cmds
-    if re.search(r'<<<\s*\$', command):
+    # 9. Here-string with variable expansion
+    if _RE_HERE_STR.search(command):
         return _blocked("here-string with variable expansion — possible env-var leakage")
 
     # 10. eval with variable expansion
-    if re.search(r'\beval\s+["\']?\$', command):
+    if _RE_EVAL_VAR.search(command):
         return _blocked("eval with variable expansion — arbitrary code execution risk")
 
-    # 11. Process substitution — <(cmd) or >(cmd) runs cmd in a subshell
-    if re.search(r'<\(|>\(', command):
+    # 11. Process substitution
+    if _RE_PROC_SUBST.search(command):
         return _blocked("process substitution detected — executes command in subshell")
 
-    # 12. Null byte injection — \x00 or $'\000' in command string
-    if re.search(r'\\x00|\$\'\\000\'', command):
+    # 12. Null byte injection
+    if _RE_NULL_BYTE.search(command):
         return _blocked("null byte injection detected — possible command smuggling")
 
-    # 13. printf %b escape interpretation — can interpret arbitrary escape sequences
-    if re.search(r'\bprintf\b.*%b', command):
+    # 13. printf %b escape interpretation
+    if _RE_PRINTF_B.search(command):
         return _blocked("printf %b detected — may interpret dangerous escape sequences")
 
-    # 14. Subshell in array index — array[$(...)] executes code during subscript evaluation
-    if re.search(r'\[\s*\$\(', command):
+    # 14. Subshell in array index
+    if _RE_ARRAY_IDX.search(command):
         return _blocked("subshell in array index detected — executes code during subscript evaluation")
 
-    # 15. Env-var override at invocation start — FOO=bar cmd can silently override PATH etc.
-    if re.search(r'^[A-Z_]+=\S+\s+\S', command, re.MULTILINE):
+    # 15. Env-var override at invocation start
+    if _RE_ENV_OVERRIDE.search(command):
         return _blocked("env-var override at invocation — may silently override PATH or other critical vars")
 
-    # 16. Bare git repo defense: block setting core.fsmonitor / core.hooksPath / other RCE-capable
-    #     git config keys — these can execute arbitrary code whenever git reads the config.
-    _GIT_RCE_KEYS = re.compile(
-        r'git\s+config.*\b(core\.fsmonitor|core\.hooksPath|core\.gitProxy|uploadpack\.packObjectsHook)\b',
-        re.IGNORECASE,
-    )
-    if _GIT_RCE_KEYS.search(command):
+    # 16. Bare git repo defense: block RCE-capable git config keys
+    if _RE_GIT_RCE_KEYS.search(command):
         return "Git config key blocked: core.fsmonitor/hooksPath/gitProxy can enable RCE"
 
-    # 17. git --config-env flag — allows injecting RCE-capable git config values via
-    #     environment variables (core.fsmonitor, diff.external, etc.). Block it entirely.
-    if re.search(r'\bgit\b.*--config-env[\s=]', command, re.IGNORECASE):
+    # 17. git --config-env flag
+    if _RE_GIT_CFG_ENV.search(command):
         return _blocked("git --config-env flag — can inject RCE-capable config values via env vars")
 
-    # 18. cd + git compound command — can bypass bare-repo detection by first cd'ing into
-    #     a malicious directory that contains a bare git repo with core.fsmonitor.
-    #     CC blocks these as they require explicit approval.
-    #     Only block when semicolon/&&/|| joins a cd with a git command.
-    if re.search(r'\bcd\b', command) and re.search(r'\bgit\b', command):
-        # Check if cd and git appear in the same compound command (joined by ; && ||)
-        if re.search(r'\bcd\b.+(?:;|&&|\|\|).+\bgit\b|\bgit\b.+(?:;|&&|\|\|).+\bcd\b', command):
+    # 18. cd + git compound command
+    if 'cd' in command and 'git' in command:
+        if _RE_CD_GIT.search(command):
             return _blocked("compound cd+git command — may bypass bare repository security checks")
 
     # ── CC-sourced advanced validators ───────────────────────────────────────────
-    # Ported from Claude Code's bashSecurity.ts (validateObfuscatedFlags and friends).
 
-    # 19. ANSI-C quoting — $'...' or $"..." decodes escape sequences at shell parse
-    #     time; e.g. $'\x72\x6d' decodes to 'rm', hiding dangerous strings from
-    #     simple text scanners.
-    if re.search(r"\$'[^']*'|\$\"[^\"]*\"", command):
+    # 19. ANSI-C quoting
+    if _RE_ANSI_C_QUOTE.search(command):
         return _blocked("ANSI-C quoting ($'...' or $\"...\") detected — may obfuscate dangerous characters")
 
-    # 20. Variable expansion used as pipe source or redirect target — $VAR | cmd or
-    #     cmd < $VAR.  The variable could expand to a sensitive/unexpected path.
-    if re.search(r'\$\{?\w+\}?\s*\|', command) or re.search(r'<\s*\$\{?\w+\}?', command):
+    # 20. Variable expansion in pipe or redirect
+    if _RE_VAR_PIPE.search(command) or _RE_VAR_REDIR.search(command):
         return _blocked("variable expansion in pipe or redirect ($VAR | cmd) — may expand to unexpected path")
 
-    # 21. /proc/*/environ access — process environment files may contain secrets
-    #     (tokens, passwords, API keys) readable by the process owner.
-    if re.search(r'/proc/[0-9a-z_*]+/environ', command):
+    # 21. /proc/*/environ access
+    if _RE_PROC_ENVIRON.search(command):
         return _blocked("/proc/*/environ access blocked — environment files may contain secrets")
 
-    # 22. Carriage return (CR) injection — a \r in the command string can cause the
-    #     terminal display to show one command while the shell executes a different
-    #     (hidden) one, enabling display/execution desynchronization.
+    # 22. Carriage return injection
     if '\r' in command or '\\r' in command:
         return _blocked("carriage return (\\r) detected — may cause shell/display desynchronization")
 
-    # 23. Quote-comment desynchronization — a # character inside a quoted string
-    #     followed by closing quote can confuse naïve parsers into thinking a comment
-    #     ends the logical line earlier than the shell does.
-    if re.search(r"""['"]\s*#\s*[^'"]*['"]""", command):
+    # 23. Quote-comment desynchronization
+    if _RE_QUOTE_COMMENT.search(command):
         return _blocked("quote-comment desynchronization detected — # inside quotes may cause parser confusion")
 
     # 24. Brace expansion depth tracking (CC: validateBraceExpansion).
