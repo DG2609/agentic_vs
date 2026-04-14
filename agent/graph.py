@@ -74,6 +74,8 @@ from agent.tools.context_hub import chub_search, chub_get, chub_annotate, chub_f
 from agent.tools.session_tools import fork_session
 from agent.tools.cron import cron_create, cron_list, cron_delete
 from agent.tools.tool_search import tool_search, tool_list, register_tools
+from agent.tools.config_tool import config_get, config_set, config_list
+from agent.tools.brief import brief
 from agent.team.tools import TEAM_TOOLS
 from agent.team.coordinator import is_coordinator_mode, get_coordinator_system_prompt
 from agent.tools.github import (
@@ -133,6 +135,8 @@ _CORE_TOOLS = [
     fork_session,
     cron_create, cron_list, cron_delete,
     tool_search, tool_list,
+    config_get, config_set, config_list,
+    brief,
     *_mcp_extra_tools,
 ]
 _all_core_names = {t.name for t in _CORE_TOOLS}
@@ -182,6 +186,10 @@ PLANNER_TOOLS = [
     cron_create, cron_list, cron_delete,
     # Tool discovery
     tool_search, tool_list,
+    # Config viewer/editor
+    config_get, config_list,
+    # Context brief
+    brief,
     # Agent Teams — coordinator tools (coordinator prompt activates their full use)
     *TEAM_TOOLS,
     # Context Hub — curated API docs (68+ services)
@@ -215,6 +223,8 @@ CODER_TOOLS = PLANNER_TOOLS + [
     github_create_issue, github_create_pr, github_comment,
     # GitLab (write)
     gitlab_create_issue, gitlab_create_mr, gitlab_comment,
+    # Config editor (write access — can change settings)
+    config_set,
     # Skill system (create, install, remove skills)
     skill_create, skill_install, skill_remove,
     # External skills (write access)
