@@ -295,19 +295,36 @@ async def set_workspace(request: web.Request):
 
 @routes.get('/api/model')
 async def model_info(request: web.Request):
-    """Return current model and provider info."""
+    """Return current model and provider info (all 19 providers)."""
     provider = config.LLM_PROVIDER
-    if provider == "ollama":
-        model = config.OLLAMA_MODEL
-    elif provider == "openai":
-        model = config.OPENAI_MODEL
-    elif provider == "anthropic":
-        model = getattr(config, 'ANTHROPIC_MODEL', 'unknown')
-    elif provider == "gemini":
-        model = getattr(config, 'GEMINI_MODEL', 'unknown')
-    else:
-        model = "unknown"
-    return web.json_response({"provider": provider, "model": model})
+    model_attr_map = {
+        "ollama":            "OLLAMA_MODEL",
+        "openai":            "OPENAI_MODEL",
+        "anthropic":         "ANTHROPIC_MODEL",
+        "google":            "GOOGLE_MODEL",
+        "groq":              "GROQ_MODEL",
+        "azure":             "AZURE_OPENAI_MODEL",
+        "vllm":              "VLLM_MODEL",
+        "llamacpp":          "LLAMACPP_MODEL",
+        "lmstudio":          "LMSTUDIO_MODEL",
+        "openai_compatible": "OPENAI_COMPATIBLE_MODEL",
+        "vertex_ai":         "VERTEX_AI_MODEL",
+        "github_copilot":    "GITHUB_COPILOT_MODEL",
+        "aws_bedrock":       "BEDROCK_MODEL",
+        "mistral":           "MISTRAL_MODEL",
+        "together":          "TOGETHER_MODEL",
+        "fireworks":         "FIREWORKS_MODEL",
+        "deepseek":          "DEEPSEEK_MODEL",
+        "perplexity":        "PERPLEXITY_MODEL",
+        "xai":               "XAI_MODEL",
+    }
+    attr = model_attr_map.get(provider, "")
+    model = getattr(config, attr, "") if attr else ""
+    return web.json_response({
+        "provider": provider,
+        "model": model or "unknown",
+        "is_local": provider in {"ollama", "vllm", "llamacpp", "lmstudio", "openai_compatible"},
+    })
 
 
 @routes.get('/api/search')
