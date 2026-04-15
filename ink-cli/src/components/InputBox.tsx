@@ -1,11 +1,27 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { Box, Text, useInput } from 'ink';
 import TextInput from 'ink-text-input';
 import { theme } from '../theme.js';
 
-const SLASH_COMMANDS = [
-  '/help', '/model', '/provider', '/plan', '/config', '/doctor',
-  '/fork', '/clear', '/theme', '/exit',
+interface SlashCommand {
+  cmd: string;
+  desc: string;
+  /** true = executes immediately on Enter (no extra args needed) */
+  instant?: boolean;
+}
+
+const ALL_COMMANDS: SlashCommand[] = [
+  { cmd: '/provider',  desc: 'Switch LLM provider (opens picker)' },
+  { cmd: '/model',     desc: 'Show or switch model for current provider' },
+  { cmd: '/plan',      desc: 'Enter plan mode' },
+  { cmd: '/doctor',    desc: 'Run diagnostics' },
+  { cmd: '/config',    desc: 'View or set config settings' },
+  { cmd: '/fork',      desc: 'Fork the current session' },
+  { cmd: '/help',      desc: 'Show keyboard shortcuts & commands', instant: true },
+  { cmd: '/clear',     desc: 'Clear chat history', instant: true },
+  { cmd: '/new',       desc: 'Start a new session', instant: true },
+  { cmd: '/theme',     desc: 'Cycle color theme', instant: true },
+  { cmd: '/exit',      desc: 'Exit ShadowDev', instant: true },
 ];
 
 interface Props {
@@ -19,76 +35,168 @@ export default function InputBox({ onSubmit, onCancel, disabled, streaming }: Pr
   const [value, setValue] = useState('');
   const [history, setHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState(-1);
-  const [hint, setHint] = useState('');
+  const [paletteIdx, setPaletteIdx] = useState(0);
+
+  // Show palette whenever value starts with /
+  const showPalette = value.startsWith('/') && !streaming && !disabled;
+
+  const filtered: SlashCommand[] = useMemo(() => {
+    if (!showPalette) return [];
+    const q = value.toLowerCase();
+    return ALL_COMMANDS.filter(c => c.cmd.startsWith(q));
+  }, [value, showPalette]);
+
+  // Reset palette index when filtered list changes
+  const clampedIdx = Math.min(paletteIdx, Math.max(0, filtered.length - 1));
 
   const handleChange = useCallback((val: string) => {
     setValue(val);
-    // Show slash command hint
-    if (val.startsWith('/')) {
-      const match = SLASH_COMMANDS.find(c => c.startsWith(val) && c !== val);
-      setHint(match ? match.slice(val.length) : '');
-    } else {
-      setHint('');
-    }
+    setPaletteIdx(0);
     setHistoryIdx(-1);
   }, []);
 
   const handleSubmit = useCallback((val: string) => {
     const trimmed = val.trim();
     if (!trimmed) return;
-    if (trimmed === '/exit' || trimmed === '/quit') {
-      process.exit(0);
+
+    // If palette is open and user hits Enter with a selection → use that command
+    if (trimmed.startsWith('/') && filtered.length > 0) {
+      const selected = filtered[clampedIdx];
+      if (selected && trimmed === '/') {
+        // bare "/" → fill in selected command
+        const filled = selected.instant ? selected.cmd : selected.cmd + ' ';
+        setValue(selected.instant ? '' : filled);
+        if (selected.instant) {
+          setHistory(prev => [selected.cmd, ...prev.slice(0, 49)]);
+          onSubmit(selected.cmd);
+        } else {
+          setValue(filled);
+        }
+        setPaletteIdx(0);
+        return;
+      }
     }
+
+    if (trimmed === '/exit' || trimmed === '/quit') process.exit(0);
+
     setHistory(prev => [trimmed, ...prev.slice(0, 49)]);
     setHistoryIdx(-1);
     setValue('');
-    setHint('');
+    setPaletteIdx(0);
     onSubmit(trimmed);
-  }, [onSubmit]);
+  }, [onSubmit, filtered, clampedIdx]);
 
   useInput((input, key) => {
-    if (key.upArrow && history.length > 0) {
-      const idx = Math.min(historyIdx + 1, history.length - 1);
-      setHistoryIdx(idx);
-      setValue(history[idx] ?? '');
-      setHint('');
-    }
-    if (key.downArrow) {
-      const idx = historyIdx - 1;
-      if (idx < 0) {
-        setHistoryIdx(-1);
+    // Inside palette: ↑↓ navigate, Enter selects, Esc closes
+    if (showPalette && filtered.length > 0) {
+      if (key.upArrow) {
+        setPaletteIdx(i => Math.max(0, i - 1));
+        return;
+      }
+      if (key.downArrow) {
+        setPaletteIdx(i => Math.min(filtered.length - 1, i + 1));
+        return;
+      }
+      if (key.escape) {
         setValue('');
-      } else {
+        setPaletteIdx(0);
+        return;
+      }
+      if (key.tab) {
+        // Tab fills in the highlighted command
+        const sel = filtered[clampedIdx];
+        if (sel) {
+          const filled = sel.instant ? sel.cmd : sel.cmd + ' ';
+          setValue(filled);
+          setPaletteIdx(0);
+        }
+        return;
+      }
+    }
+
+    // Outside palette: history navigation
+    if (!showPalette) {
+      if (key.upArrow && history.length > 0) {
+        const idx = Math.min(historyIdx + 1, history.length - 1);
         setHistoryIdx(idx);
         setValue(history[idx] ?? '');
+        return;
       }
-      setHint('');
+      if (key.downArrow) {
+        const idx = historyIdx - 1;
+        setHistoryIdx(idx);
+        setValue(idx < 0 ? '' : (history[idx] ?? ''));
+        return;
+      }
     }
-    // Tab to complete slash command
-    if (input === '\t' && hint) {
-      setValue(value + hint);
-      setHint('');
-    }
-    // Ctrl+C to stop generation
+
+    // Ctrl+C stops generation
     if (key.ctrl && input === 'c' && streaming) {
       onCancel();
     }
   });
 
-  const borderColor = streaming ? theme.yellow : disabled ? theme.border : theme.borderActive;
+  const borderColor = streaming
+    ? theme.yellow
+    : disabled
+    ? theme.border
+    : showPalette
+    ? theme.accent
+    : theme.borderActive;
+
   const prompt = streaming ? '⏸' : '›';
   const promptColor = streaming ? theme.yellow : theme.accent;
 
   return (
     <Box flexDirection="column">
-      {/* Hint bar */}
-      {hint && (
-        <Box paddingX={2}>
-          <Text color={theme.textDim}>Tab to complete: </Text>
-          <Text color={theme.accentBright}>{value}</Text>
-          <Text color={theme.textDim}>{hint}</Text>
+      {/* Command Palette — appears ABOVE input when typing / */}
+      {showPalette && filtered.length > 0 && (
+        <Box
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={theme.accent}
+          marginX={1}
+          paddingX={1}
+        >
+          {/* Palette header */}
+          <Box justifyContent="space-between">
+            <Text color={theme.accent} bold>Commands</Text>
+            <Text color={theme.textDim}>↑↓ navigate  Tab fill  Enter run  Esc cancel</Text>
+          </Box>
+
+          {/* Command rows */}
+          {filtered.map((c, i) => {
+            const isSelected = i === clampedIdx;
+            return (
+              <Box key={c.cmd} gap={1}>
+                <Text color={isSelected ? theme.accent : theme.textDim}>
+                  {isSelected ? '▶' : ' '}
+                </Text>
+                <Text
+                  color={isSelected ? theme.accentBright : theme.textMuted}
+                  bold={isSelected}
+                >
+                  {c.cmd.padEnd(14)}
+                </Text>
+                <Text color={theme.textDim}>{c.desc}</Text>
+                {c.instant && (
+                  <Text color={theme.green}> ↵</Text>
+                )}
+              </Box>
+            );
+          })}
         </Box>
       )}
+
+      {/* No match hint */}
+      {showPalette && filtered.length === 0 && (
+        <Box paddingX={2}>
+          <Text color={theme.red}>No matching command — </Text>
+          <Text color={theme.textDim}>Esc to cancel</Text>
+        </Box>
+      )}
+
+      {/* Input row */}
       <Box
         borderStyle="round"
         borderColor={borderColor}
@@ -101,7 +209,11 @@ export default function InputBox({ onSubmit, onCancel, disabled, streaming }: Pr
             value={value}
             onChange={handleChange}
             onSubmit={handleSubmit}
-            placeholder={streaming ? 'Generating... (Ctrl+C to stop)' : 'Message ShadowDev...'}
+            placeholder={
+              streaming
+                ? 'Generating...  Ctrl+C to stop'
+                : 'Message ShadowDev...  or / for commands'
+            }
             focus={!disabled}
           />
         </Box>
