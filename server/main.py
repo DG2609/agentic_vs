@@ -327,6 +327,86 @@ async def model_info(request: web.Request):
     })
 
 
+_MODEL_ATTR_MAP = {
+    "ollama":            ("OLLAMA_MODEL",            "local"),
+    "openai":            ("OPENAI_MODEL",            "cloud"),
+    "anthropic":         ("ANTHROPIC_MODEL",         "cloud"),
+    "google":            ("GOOGLE_MODEL",            "cloud"),
+    "groq":              ("GROQ_MODEL",              "cloud"),
+    "azure":             ("AZURE_OPENAI_MODEL",      "cloud"),
+    "vllm":              ("VLLM_MODEL",              "local"),
+    "llamacpp":          ("LLAMACPP_MODEL",          "local"),
+    "lmstudio":          ("LMSTUDIO_MODEL",          "local"),
+    "openai_compatible": ("OPENAI_COMPATIBLE_MODEL", "local"),
+    "vertex_ai":         ("VERTEX_AI_MODEL",         "cloud"),
+    "github_copilot":    ("GITHUB_COPILOT_MODEL",    "cloud"),
+    "aws_bedrock":       ("BEDROCK_MODEL",           "cloud"),
+    "mistral":           ("MISTRAL_MODEL",           "cloud"),
+    "together":          ("TOGETHER_MODEL",          "cloud"),
+    "fireworks":         ("FIREWORKS_MODEL",         "cloud"),
+    "deepseek":          ("DEEPSEEK_MODEL",          "cloud"),
+    "perplexity":        ("PERPLEXITY_MODEL",        "cloud"),
+    "xai":               ("XAI_MODEL",              "cloud"),
+}
+
+_PROVIDER_LABELS = {
+    "ollama": "Ollama", "openai": "OpenAI", "anthropic": "Anthropic",
+    "google": "Google Gemini", "groq": "Groq", "azure": "Azure OpenAI",
+    "vllm": "vLLM", "llamacpp": "llama.cpp", "lmstudio": "LM Studio",
+    "openai_compatible": "OpenAI-compatible",
+    "vertex_ai": "Vertex AI (GCP)", "github_copilot": "GitHub Copilot",
+    "aws_bedrock": "AWS Bedrock", "mistral": "Mistral AI",
+    "together": "Together AI", "fireworks": "Fireworks AI",
+    "deepseek": "DeepSeek", "perplexity": "Perplexity AI", "xai": "xAI / Grok",
+}
+
+
+@routes.get('/api/providers')
+async def list_providers(request: web.Request):
+    """List all 19 providers with their current model and type."""
+    providers = []
+    for pid, (attr, ptype) in _MODEL_ATTR_MAP.items():
+        model = getattr(config, attr, "") or ""
+        providers.append({
+            "id": pid,
+            "label": _PROVIDER_LABELS.get(pid, pid),
+            "type": ptype,
+            "model": model,
+        })
+    return web.json_response({
+        "current": config.LLM_PROVIDER,
+        "providers": providers,
+    })
+
+
+@routes.post('/api/provider')
+async def set_provider(request: web.Request):
+    """Switch the active LLM provider (and optionally model) at runtime."""
+    payload = await request.json()
+    provider = payload.get("provider", "").strip()
+    model = payload.get("model", "").strip()
+
+    if provider not in _MODEL_ATTR_MAP:
+        return web.json_response(
+            {"error": f"Unknown provider '{provider}'. Valid: {sorted(_MODEL_ATTR_MAP)}"},
+            status=400,
+        )
+
+    config.LLM_PROVIDER = provider
+    attr, ptype = _MODEL_ATTR_MAP[provider]
+    if model:
+        setattr(config, attr, model)
+
+    current_model = getattr(config, attr, "") or "unknown"
+    return web.json_response({
+        "status": "ok",
+        "provider": provider,
+        "label": _PROVIDER_LABELS.get(provider, provider),
+        "model": current_model,
+        "is_local": ptype == "local",
+    })
+
+
 @routes.get('/api/search')
 async def search_files(request: web.Request):
     """Search for text in workspace files."""

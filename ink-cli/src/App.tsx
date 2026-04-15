@@ -7,8 +7,12 @@ import ChatPane from './components/ChatPane.js';
 import Sidebar from './components/Sidebar.js';
 import InputBox from './components/InputBox.js';
 import StatusBar from './components/StatusBar.js';
+import ProviderPicker from './components/ProviderPicker.js';
 import { theme } from './theme.js';
 import type { FileNode } from './types.js';
+import type { ProviderItem } from './components/ProviderPicker.js';
+
+const BACKEND = 'http://localhost:8000';
 
 const HELP_TEXT = `
 ◆ ShadowDev — Keyboard Shortcuts & Commands
@@ -39,10 +43,15 @@ export default function App() {
   const [files, setFiles] = useState<FileNode[]>([]);
   const [tokenCount, setTokenCount] = useState(0);
 
+  // Provider picker state
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerProviders, setPickerProviders] = useState<ProviderItem[]>([]);
+  const [pickerIdx, setPickerIdx] = useState(0);
+
   // Fetch files when sidebar opens
   useEffect(() => {
     if (!sidebarOpen || !server.isReady) return;
-    fetch('http://localhost:8000/api/files')
+    fetch(`${BACKEND}/api/files`)
       .then(r => r.json())
       .then((data: { items?: Array<{ name: string; path: string; is_dir: boolean }> }) => {
         const nodes: FileNode[] = (data.items ?? []).map(item => ({
@@ -61,8 +70,40 @@ export default function App() {
     setTokenCount(Math.round(totalChars / 4));
   }, [socket.messages]);
 
+  // Open provider picker
+  const openProviderPicker = useCallback(() => {
+    fetch(`${BACKEND}/api/providers`)
+      .then(r => r.json())
+      .then((data: { current: string; providers: ProviderItem[] }) => {
+        setPickerProviders(data.providers);
+        const idx = data.providers.findIndex(p => p.id === data.current);
+        setPickerIdx(idx >= 0 ? idx : 0);
+        setPickerOpen(true);
+      })
+      .catch(() => {
+        // fallback: inject error msg
+        socket.sendMessage('Could not load providers — is the backend running?', threadId);
+      });
+  }, [socket, threadId]);
+
+  const handlePickerSelect = useCallback((provider: ProviderItem) => {
+    setPickerOpen(false);
+    fetch(`${BACKEND}/api/provider`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: provider.id }),
+    })
+      .then(r => r.json())
+      .then((data: { status: string; provider: string; label: string; model: string }) => {
+        // Update socket config display immediately
+        socket.updateConfig?.({ provider: data.provider, model: data.model });
+      })
+      .catch(() => {});
+  }, [socket]);
+
   // Keyboard shortcuts
   useInput((input, key) => {
+    if (pickerOpen) return; // picker handles its own input
     if (key.ctrl) {
       if (input === 'b') setSidebarOpen(o => !o);
       if (input === 'l') socket.clearMessages();
@@ -87,8 +128,27 @@ export default function App() {
       return;
     }
     if (trimmed === '/help') {
-      // Inject help as assistant message — done via sendMessage so it shows in chat
       socket.sendMessage('/help', threadId);
+      return;
+    }
+    // /provider → open picker; /provider <name> → switch directly
+    if (trimmed === '/provider') {
+      openProviderPicker();
+      return;
+    }
+    if (trimmed.startsWith('/provider ')) {
+      const pid = trimmed.slice('/provider '.length).trim();
+      fetch(`${BACKEND}/api/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: pid }),
+      })
+        .then(r => r.json())
+        .then((d: { status?: string; error?: string; provider?: string; model?: string }) => {
+          if (d.error) socket.sendMessage(`Provider error: ${d.error}`, threadId);
+          else socket.updateConfig?.({ provider: d.provider ?? pid, model: d.model ?? '' });
+        })
+        .catch(() => {});
       return;
     }
 
@@ -155,6 +215,20 @@ export default function App() {
         </Box>
       </Box>
 
+      {/* Provider picker overlay — shown above input when active */}
+      {pickerOpen && (
+        <ProviderPicker
+          providers={pickerProviders}
+          current={socket.config.provider}
+          selectedIdx={pickerIdx}
+          onNavigate={(delta) =>
+            setPickerIdx(i => Math.max(0, Math.min(pickerProviders.length - 1, i + delta)))
+          }
+          onSelect={handlePickerSelect}
+          onCancel={() => setPickerOpen(false)}
+        />
+      )}
+
       {/* Main content row */}
       <Box flexGrow={1} overflow="hidden">
         <Sidebar
@@ -173,7 +247,7 @@ export default function App() {
       <InputBox
         onSubmit={handleSubmit}
         onCancel={handleCancel}
-        disabled={false}
+        disabled={pickerOpen}
         streaming={socket.streaming}
       />
 

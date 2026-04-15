@@ -14,6 +14,7 @@ interface UseSocketReturn {
   stopGeneration: (threadId: string) => void;
   clearMessages: () => void;
   updateToolExpanded: (msgId: string, toolId: string, expanded: boolean) => void;
+  updateConfig: (partial: Partial<AppConfig>) => void;
 }
 
 export function useSocket(serverReady: boolean): UseSocketReturn {
@@ -182,5 +183,9 @@ export function useSocket(serverReady: boolean): UseSocketReturn {
     ));
   }, []);
 
-  return { connected, messages, streaming, config, workers, sendMessage, stopGeneration, clearMessages, updateToolExpanded };
+  const updateConfig = useCallback((partial: Partial<AppConfig>) => {
+    setConfig(prev => ({ ...prev, ...partial }));
+  }, []);
+
+  return { connected, messages, streaming, config, workers, sendMessage, stopGeneration, clearMessages, updateToolExpanded, updateConfig };
 }
