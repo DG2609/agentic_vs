@@ -407,6 +407,68 @@ async def set_provider(request: web.Request):
     })
 
 
+_KNOWN_MODELS: dict[str, list[str]] = {
+    "openai":         ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo", "o1", "o1-mini", "o3-mini"],
+    "anthropic":      ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001",
+                       "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"],
+    "google":         ["gemini-2.0-flash", "gemini-2.0-flash-thinking-exp",
+                       "gemini-1.5-pro", "gemini-1.5-flash", "gemini-1.5-flash-8b"],
+    "groq":           ["llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+                       "mixtral-8x7b-32768", "gemma2-9b-it"],
+    "azure":          ["gpt-4o", "gpt-4-turbo", "gpt-35-turbo"],
+    "vertex_ai":      ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"],
+    "github_copilot": ["gpt-4o", "claude-3.5-sonnet", "o1-preview", "o3-mini"],
+    "aws_bedrock":    ["anthropic.claude-3-5-sonnet-20241022-v2:0",
+                       "anthropic.claude-3-haiku-20240307-v1:0",
+                       "amazon.titan-text-express-v1", "meta.llama3-70b-instruct-v1:0"],
+    "mistral":        ["mistral-large-latest", "mistral-medium-latest", "mistral-small-latest",
+                       "codestral-latest", "open-mistral-nemo"],
+    "together":       ["meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo",
+                       "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+                       "mistralai/Mixtral-8x7B-Instruct-v0.1",
+                       "Qwen/Qwen2.5-72B-Instruct-Turbo"],
+    "fireworks":      ["accounts/fireworks/models/firefunction-v2",
+                       "accounts/fireworks/models/llama-v3p1-70b-instruct",
+                       "accounts/fireworks/models/mixtral-8x7b-instruct"],
+    "deepseek":       ["deepseek-chat", "deepseek-reasoner"],
+    "perplexity":     ["llama-3.1-sonar-huge-128k-online",
+                       "llama-3.1-sonar-large-128k-online",
+                       "llama-3.1-sonar-small-128k-online"],
+    "xai":            ["grok-2", "grok-beta", "grok-vision-beta"],
+}
+
+
+@routes.get('/api/models')
+async def list_models(request: web.Request):
+    """Return known/available models for a provider."""
+    provider = request.query.get('provider', config.LLM_PROVIDER)
+    models = list(_KNOWN_MODELS.get(provider, []))
+
+    # For Ollama: try dynamic fetch from local API
+    if provider == "ollama" and not models:
+        try:
+            import aiohttp as _aiohttp
+            async with _aiohttp.ClientSession() as session:
+                async with session.get(
+                    "http://localhost:11434/api/tags",
+                    timeout=_aiohttp.ClientTimeout(total=3),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        models = [m["name"] for m in data.get("models", [])]
+        except Exception:
+            pass
+
+    attr, _ = _MODEL_ATTR_MAP.get(provider, ("", ""))
+    current = (getattr(config, attr, "") or "") if attr else ""
+
+    return web.json_response({
+        "provider": provider,
+        "current": current,
+        "models": models,
+    })
+
+
 @routes.get('/api/search')
 async def search_files(request: web.Request):
     """Search for text in workspace files."""

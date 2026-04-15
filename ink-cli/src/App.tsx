@@ -8,6 +8,7 @@ import Sidebar from './components/Sidebar.js';
 import InputBox from './components/InputBox.js';
 import StatusBar from './components/StatusBar.js';
 import ProviderPicker from './components/ProviderPicker.js';
+import ModelPicker from './components/ModelPicker.js';
 import { theme } from './theme.js';
 import type { FileNode } from './types.js';
 import type { ProviderItem } from './components/ProviderPicker.js';
@@ -61,6 +62,11 @@ export default function App() {
   const [pickerProviders, setPickerProviders] = useState<ProviderItem[]>([]);
   const [pickerIdx, setPickerIdx] = useState(0);
 
+  // Model picker state
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelList, setModelList] = useState<string[]>([]);
+  const [modelPickerIdx, setModelPickerIdx] = useState(0);
+
   // Fetch files when sidebar opens
   useEffect(() => {
     if (!sidebarOpen || !server.isReady) return;
@@ -99,6 +105,40 @@ export default function App() {
       });
   }, [socket, threadId]);
 
+  // Open model picker for current provider
+  const openModelPicker = useCallback(() => {
+    fetch(`${BACKEND}/api/models?provider=${socket.config.provider}`)
+      .then(r => r.json())
+      .then((data: { models: string[]; current: string }) => {
+        setModelList(data.models);
+        const idx = data.models.indexOf(data.current);
+        setModelPickerIdx(idx >= 0 ? idx : 0);
+        setModelPickerOpen(true);
+      })
+      .catch(() => {
+        socket.injectMessage(`Could not load models for ${socket.config.provider}`);
+      });
+  }, [socket]);
+
+  const handleModelSelect = useCallback((model: string) => {
+    setModelPickerOpen(false);
+    fetch(`${BACKEND}/api/provider`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: socket.config.provider, model }),
+    })
+      .then(r => r.json())
+      .then((d: { error?: string; model?: string }) => {
+        if (d.error) {
+          socket.injectMessage(`Error: ${d.error}`);
+        } else {
+          socket.updateConfig({ model: d.model ?? model });
+          socket.injectMessage(`Model switched to: ${d.model ?? model}`);
+        }
+      })
+      .catch(err => socket.injectMessage(`Failed to switch model: ${String(err)}`));
+  }, [socket]);
+
   const handlePickerSelect = useCallback((provider: ProviderItem) => {
     setPickerOpen(false);
     fetch(`${BACKEND}/api/provider`, {
@@ -116,7 +156,7 @@ export default function App() {
 
   // Keyboard shortcuts
   useInput((input, key) => {
-    if (pickerOpen) return; // picker handles its own input
+    if (pickerOpen || modelPickerOpen) return; // pickers handle their own input
     if (key.ctrl) {
       if (input === 'b') setSidebarOpen(o => !o);
       if (input === 'l') socket.clearMessages();
@@ -195,9 +235,9 @@ export default function App() {
       return;
     }
 
-    // /model — show current; /model <name> — switch model for current provider
+    // /model — open model picker; /model <name> — switch model directly
     if (trimmed === '/model') {
-      socket.injectMessage(`Current: ${socket.config.provider} / ${socket.config.model}`);
+      openModelPicker();
       return;
     }
     if (trimmed.startsWith('/model ')) {
@@ -263,7 +303,7 @@ export default function App() {
     // /plan — send to AI (it's a mode toggle, not a UI-only command)
     // Everything else → send to AI
     socket.sendMessage(trimmed, threadId);
-  }, [socket, threadId, themeName, openProviderPicker]);
+  }, [socket, threadId, themeName, openProviderPicker, openModelPicker]);
 
   const handleCancel = useCallback(() => {
     socket.stopGeneration(threadId);
@@ -325,7 +365,7 @@ export default function App() {
         </Box>
       </Box>
 
-      {/* Provider picker overlay — shown above input when active */}
+      {/* Provider picker overlay */}
       {pickerOpen && (
         <ProviderPicker
           providers={pickerProviders}
@@ -336,6 +376,21 @@ export default function App() {
           }
           onSelect={handlePickerSelect}
           onCancel={() => setPickerOpen(false)}
+        />
+      )}
+
+      {/* Model picker overlay */}
+      {modelPickerOpen && (
+        <ModelPicker
+          provider={socket.config.provider}
+          models={modelList}
+          current={socket.config.model}
+          selectedIdx={modelPickerIdx}
+          onNavigate={(delta) =>
+            setModelPickerIdx(i => Math.max(0, Math.min(modelList.length - 1, i + delta)))
+          }
+          onSelect={handleModelSelect}
+          onCancel={() => setModelPickerOpen(false)}
         />
       )}
 
@@ -357,7 +412,7 @@ export default function App() {
       <InputBox
         onSubmit={handleSubmit}
         onCancel={handleCancel}
-        disabled={pickerOpen}
+        disabled={pickerOpen || modelPickerOpen}
         streaming={socket.streaming}
       />
 
