@@ -51,11 +51,20 @@ export function useServer() {
       const proc = spawn('python', ['server/main.py'], {
         cwd: PROJECT_ROOT,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env },
+        env: {
+          ...process.env,
+          // Force UTF-8 output so Windows charmap doesn't crash on emoji
+          PYTHONIOENCODING: 'utf-8',
+          PYTHONUTF8: '1',
+        },
       });
 
       procRef.current = proc;
       setState(s => ({ ...s, pid: proc.pid ?? null }));
+
+      // Collect stderr for error reporting
+      const stderrChunks: Buffer[] = [];
+      proc.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
 
       proc.on('error', (err) => {
         setState({ isReady: false, isStarting: false, error: `Failed to start server: ${err.message}`, pid: null });
@@ -63,7 +72,8 @@ export function useServer() {
 
       proc.on('exit', (code) => {
         if (code !== 0 && code !== null) {
-          setState(s => ({ ...s, isReady: false, error: `Server exited with code ${code}` }));
+          const errText = Buffer.concat(stderrChunks).toString('utf-8').slice(-400);
+          setState(s => ({ ...s, isReady: false, isStarting: false, error: `Server exited (code ${code}):\n${errText}` }));
         }
       });
 
@@ -72,7 +82,13 @@ export function useServer() {
         if (ready) {
           setState(s => ({ ...s, isReady: true, isStarting: false }));
         } else {
-          setState({ isReady: false, isStarting: false, error: 'Server failed to start within 30s', pid: null });
+          const errText = Buffer.concat(stderrChunks).toString('utf-8').slice(-400);
+          setState({
+            isReady: false, isStarting: false, pid: null,
+            error: errText
+              ? `Server failed to start:\n${errText}`
+              : 'Server did not respond within 30s — check Python + dependencies',
+          });
         }
       });
     });
