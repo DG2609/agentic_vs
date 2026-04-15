@@ -15,6 +15,8 @@ interface UseSocketReturn {
   clearMessages: () => void;
   updateToolExpanded: (msgId: string, toolId: string, expanded: boolean) => void;
   updateConfig: (partial: Partial<AppConfig>) => void;
+  /** Inject a local assistant message without calling AI */
+  injectMessage: (content: string) => void;
 }
 
 export function useSocket(serverReady: boolean): UseSocketReturn {
@@ -187,5 +189,16 @@ export function useSocket(serverReady: boolean): UseSocketReturn {
     setConfig(prev => ({ ...prev, ...partial }));
   }, []);
 
-  return { connected, messages, streaming, config, workers, sendMessage, stopGeneration, clearMessages, updateToolExpanded, updateConfig };
+  const injectMessage = useCallback((content: string) => {
+    const msg: Message = {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content,
+      timestamp: new Date(),
+      tools: [],
+    };
+    setMessages(prev => [...prev, msg]);
+  }, []);
+
+  return { connected, messages, streaming, config, workers, sendMessage, stopGeneration, clearMessages, updateToolExpanded, updateConfig, injectMessage };
 }

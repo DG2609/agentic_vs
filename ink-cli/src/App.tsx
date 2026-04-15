@@ -14,24 +14,35 @@ import type { ProviderItem } from './components/ProviderPicker.js';
 
 const BACKEND = 'http://localhost:8000';
 
-const HELP_TEXT = `
-◆ ShadowDev — Keyboard Shortcuts & Commands
+const THEMES = ['dark', 'monokai', 'nord'] as const;
+type ThemeName = typeof THEMES[number];
 
-  Ctrl+B        Toggle sidebar (file tree + team)
-  Ctrl+L        Clear chat history
-  Ctrl+N        New session
-  Ctrl+C        Stop generation / Exit
+const THEME_ACCENT: Record<ThemeName, string> = {
+  dark:    '#8b5cf6',
+  monokai: '#a6e22e',
+  nord:    '#88c0d0',
+};
 
-  /help         Show this help
-  /clear        Clear messages
-  /new          New session
-  /model [name] Show or switch model
-  /provider [p] Show or switch provider
-  /plan         Enter plan mode
-  /doctor       Run diagnostics
-  /config       View/set config
-  /exit         Exit ShadowDev
-`.trim();
+const HELP_TEXT = `◆ ShadowDev — Commands & Shortcuts
+
+  /provider         Open provider picker (19 providers)
+  /provider <name>  Switch provider directly
+  /model            Show current model
+  /model <name>     Switch model for current provider
+  /theme            Cycle color theme (dark → monokai → nord)
+  /doctor           Show backend health & diagnostics
+  /config           Show current config (provider, model, workspace)
+  /clear            Clear chat history
+  /new              Start a new session
+  /fork             Fork current session
+  /plan             Enter plan mode
+  /help             Show this help
+  /exit             Exit ShadowDev
+
+  Ctrl+B   Toggle sidebar (file tree + agent team)
+  Ctrl+L   Clear chat
+  Ctrl+N   New session
+  Ctrl+C   Stop generation / Exit`;
 
 export default function App() {
   const { exit } = useApp();
@@ -42,6 +53,8 @@ export default function App() {
   const [threadId, setThreadId] = useState(() => crypto.randomUUID());
   const [files, setFiles] = useState<FileNode[]>([]);
   const [tokenCount, setTokenCount] = useState(0);
+  const [themeName, setThemeName] = useState<ThemeName>('dark');
+  const accentColor = THEME_ACCENT[themeName];
 
   // Provider picker state
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -119,19 +132,45 @@ export default function App() {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    // Slash command handling
-    if (trimmed === '/clear') { socket.clearMessages(); return; }
-    if (trimmed === '/exit' || trimmed === '/quit') { process.exit(0); }
-    if (trimmed === '/new' || trimmed === '/reset') {
-      setThreadId(crypto.randomUUID());
+    // ── All slash commands handled 100% locally — never sent to AI ──
+
+    // /clear
+    if (trimmed === '/clear') {
       socket.clearMessages();
       return;
     }
-    if (trimmed === '/help') {
-      socket.sendMessage('/help', threadId);
+
+    // /exit /quit
+    if (trimmed === '/exit' || trimmed === '/quit') {
+      process.exit(0);
+    }
+
+    // /new /reset
+    if (trimmed === '/new' || trimmed === '/reset') {
+      setThreadId(crypto.randomUUID());
+      socket.clearMessages();
+      socket.injectMessage('New session started.');
       return;
     }
-    // /provider → open picker; /provider <name> → switch directly
+
+    // /help
+    if (trimmed === '/help') {
+      socket.injectMessage(HELP_TEXT);
+      return;
+    }
+
+    // /theme — cycle through themes locally, no AI call
+    if (trimmed === '/theme') {
+      setThemeName(prev => {
+        const idx = THEMES.indexOf(prev);
+        const next = THEMES[(idx + 1) % THEMES.length];
+        socket.injectMessage(`Theme switched to: ${next}`);
+        return next;
+      });
+      return;
+    }
+
+    // /provider → picker; /provider <name> → direct switch
     if (trimmed === '/provider') {
       openProviderPicker();
       return;
@@ -144,16 +183,87 @@ export default function App() {
         body: JSON.stringify({ provider: pid }),
       })
         .then(r => r.json())
-        .then((d: { status?: string; error?: string; provider?: string; model?: string }) => {
-          if (d.error) socket.sendMessage(`Provider error: ${d.error}`, threadId);
-          else socket.updateConfig?.({ provider: d.provider ?? pid, model: d.model ?? '' });
+        .then((d: { error?: string; provider?: string; label?: string; model?: string }) => {
+          if (d.error) {
+            socket.injectMessage(`Error: ${d.error}`);
+          } else {
+            socket.updateConfig({ provider: d.provider ?? pid, model: d.model ?? '' });
+            socket.injectMessage(`Provider switched to ${d.label ?? d.provider} (${d.model})`);
+          }
         })
-        .catch(() => {});
+        .catch(err => socket.injectMessage(`Failed to switch provider: ${String(err)}`));
       return;
     }
 
+    // /model — show current; /model <name> — switch model for current provider
+    if (trimmed === '/model') {
+      socket.injectMessage(`Current: ${socket.config.provider} / ${socket.config.model}`);
+      return;
+    }
+    if (trimmed.startsWith('/model ')) {
+      const modelName = trimmed.slice('/model '.length).trim();
+      fetch(`${BACKEND}/api/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: socket.config.provider, model: modelName }),
+      })
+        .then(r => r.json())
+        .then((d: { error?: string; provider?: string; model?: string }) => {
+          if (d.error) {
+            socket.injectMessage(`Error: ${d.error}`);
+          } else {
+            socket.updateConfig({ model: d.model ?? modelName });
+            socket.injectMessage(`Model switched to: ${d.model ?? modelName}`);
+          }
+        })
+        .catch(err => socket.injectMessage(`Failed to switch model: ${String(err)}`));
+      return;
+    }
+
+    // /doctor — fetch /health and show diagnostics
+    if (trimmed === '/doctor') {
+      fetch(`${BACKEND}/health`)
+        .then(r => r.json())
+        .then((d: { status?: string; tools?: number; model?: string }) => {
+          socket.injectMessage(
+            `Backend health: ${d.status ?? 'unknown'}\n` +
+            `Tools loaded: ${d.tools ?? '?'}\n` +
+            `Active model: ${d.model ?? socket.config.model}\n` +
+            `Provider: ${socket.config.provider}`
+          );
+        })
+        .catch(() => socket.injectMessage('Could not reach backend — is it running?'));
+      return;
+    }
+
+    // /config — show current runtime config
+    if (trimmed === '/config') {
+      fetch(`${BACKEND}/api/model`)
+        .then(r => r.json())
+        .then((d: { provider?: string; model?: string; is_local?: boolean }) => {
+          socket.injectMessage(
+            `Config snapshot:\n` +
+            `  provider  ${d.provider ?? socket.config.provider}\n` +
+            `  model     ${d.model ?? socket.config.model}\n` +
+            `  type      ${d.is_local ? 'LOCAL' : 'cloud'}\n` +
+            `  theme     ${themeName}`
+          );
+        })
+        .catch(() => socket.injectMessage('Could not fetch config.'));
+      return;
+    }
+
+    // /fork — duplicate session into new threadId
+    if (trimmed === '/fork') {
+      setThreadId(crypto.randomUUID());
+      socket.injectMessage('Session forked — continuing with a new thread ID.');
+      return;
+    }
+
+    // /plan — send to AI (it's a mode toggle, not a UI-only command)
+    // Everything else → send to AI
     socket.sendMessage(trimmed, threadId);
-  }, [socket, threadId]);
+  }, [socket, threadId, themeName, openProviderPicker]);
 
   const handleCancel = useCallback(() => {
     socket.stopGeneration(threadId);
