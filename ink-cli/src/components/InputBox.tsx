@@ -42,8 +42,12 @@ export default function InputBox({ onSubmit, onCancel, disabled, streaming }: Pr
 
   const filtered: SlashCommand[] = useMemo(() => {
     if (!showPalette) return [];
-    const q = value.toLowerCase();
-    return ALL_COMMANDS.filter(c => c.cmd.startsWith(q));
+    const q = value.trim().toLowerCase();
+    if (q === '/') return ALL_COMMANDS;                 // bare / → show all
+    return ALL_COMMANDS.filter(c =>
+      c.cmd.startsWith(q) ||                           // /mod → /model
+      q.startsWith(c.cmd),                             // /model<space> still matches /model
+    );
   }, [value, showPalette]);
 
   // Reset palette index when filtered list changes
