@@ -17,6 +17,8 @@ interface UseSocketReturn {
   updateConfig: (partial: Partial<AppConfig>) => void;
   /** Inject a local assistant message without calling AI */
   injectMessage: (content: string) => void;
+  /** Raw socket for use by sub-hooks (e.g. useIntel) */
+  socket: Socket | null;
 }
 
 export function useSocket(serverReady: boolean): UseSocketReturn {
@@ -200,5 +202,5 @@ export function useSocket(serverReady: boolean): UseSocketReturn {
     setMessages(prev => [...prev, msg]);
   }, []);
 
-  return { connected, messages, streaming, config, workers, sendMessage, stopGeneration, clearMessages, updateToolExpanded, updateConfig, injectMessage };
+  return { connected, messages, streaming, config, workers, sendMessage, stopGeneration, clearMessages, updateToolExpanded, updateConfig, injectMessage, socket: socketRef.current };
 }

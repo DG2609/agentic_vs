@@ -3,12 +3,14 @@ import { Box, Text, useInput, useApp } from 'ink';
 import Spinner from 'ink-spinner';
 import { useServer } from './hooks/useServer.js';
 import { useSocket } from './hooks/useSocket.js';
+import { useIntel } from './hooks/useIntel.js';
 import ChatPane from './components/ChatPane.js';
 import Sidebar from './components/Sidebar.js';
 import InputBox from './components/InputBox.js';
 import StatusBar from './components/StatusBar.js';
 import ProviderPicker from './components/ProviderPicker.js';
 import ModelPicker from './components/ModelPicker.js';
+import IntelPanel from './components/IntelPanel.js';
 import { theme } from './theme.js';
 import type { FileNode } from './types.js';
 import type { ProviderItem } from './components/ProviderPicker.js';
@@ -49,6 +51,7 @@ export default function App() {
   const { exit } = useApp();
   const server = useServer();
   const socket = useSocket(server.isReady);
+  const intel = useIntel(socket.socket);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [threadId, setThreadId] = useState(() => crypto.randomUUID());
@@ -300,6 +303,20 @@ export default function App() {
       return;
     }
 
+    // /intel — start PromptIntel continuous improvement engine
+    if (trimmed === '/intel') {
+      socket.injectMessage('PromptIntel started — mining CC source...');
+      fetch(`${BACKEND}/api/intel/start`, { method: 'POST' }).catch(() => {});
+      return;
+    }
+
+    // /intel stop — stop PromptIntel
+    if (trimmed === '/intel stop') {
+      socket.injectMessage('PromptIntel stopping...');
+      fetch(`${BACKEND}/api/intel/stop`, { method: 'POST' }).catch(() => {});
+      return;
+    }
+
     // /plan — send to AI (it's a mode toggle, not a UI-only command)
     // Everything else → send to AI
     socket.sendMessage(trimmed, threadId);
@@ -395,17 +412,20 @@ export default function App() {
       )}
 
       {/* Main content row */}
-      <Box flexGrow={1} overflow="hidden">
-        <Sidebar
-          files={files}
-          workers={socket.workers.map(w => ({ ...w, status: w.status as 'idle'|'running'|'done'|'error' }))}
-          open={sidebarOpen}
-        />
-        <ChatPane
-          messages={socket.messages}
-          onToggleTool={handleToggleTool}
-          sidebarOpen={sidebarOpen}
-        />
+      <Box flexGrow={1} overflow="hidden" flexDirection="column">
+        <Box flexGrow={1} overflow="hidden">
+          <Sidebar
+            files={files}
+            workers={socket.workers.map(w => ({ ...w, status: w.status as 'idle'|'running'|'done'|'error' }))}
+            open={sidebarOpen}
+          />
+          <ChatPane
+            messages={socket.messages}
+            onToggleTool={handleToggleTool}
+            sidebarOpen={sidebarOpen}
+          />
+        </Box>
+        {(intel.running || intel.round > 0) && <IntelPanel intel={intel} />}
       </Box>
 
       {/* Input */}

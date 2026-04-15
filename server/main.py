@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from agent.graph import build_graph
+from agent.team.prompt_intel import PromptIntelTeam
 from models.schemas import StreamChunk, ToolExecution
 import config
 
@@ -37,6 +38,10 @@ sio = socketio.AsyncServer(
 # Global state
 graph = None
 active_tasks: dict[str, asyncio.Task] = {}  # thread_id -> running task
+
+# PromptIntel global state
+intel_team: "PromptIntelTeam | None" = None
+intel_task: "asyncio.Task | None" = None
 
 
 # ── Socket.IO Events ───────────────────────────────────────
@@ -670,6 +675,46 @@ async def get_git_status(request: web.Request):
         return web.json_response({"error": str(e)}, status=200)
 
 
+# ── PromptIntel Routes ─────────────────────────────────────
+
+@routes.get('/api/intel/status')
+async def intel_status(request: web.Request):
+    """Return current PromptIntelTeam status."""
+    if intel_team is None:
+        return web.json_response({"running": False, "round": 0, "overall_score": 0,
+                                  "total_improvements": 0})
+    return web.json_response(await intel_team.get_status())
+
+
+@routes.post('/api/intel/start')
+async def intel_start(request: web.Request):
+    """Start the PromptIntelTeam if not already running."""
+    global intel_team, intel_task
+    if intel_team is not None and intel_team.running:
+        return web.json_response({"status": "already_running", "round": intel_team.round})
+
+    intel_team = PromptIntelTeam(sio=sio)
+    intel_task = asyncio.create_task(intel_team.run_forever())
+    logger.info("PromptIntelTeam started via API")
+    return web.json_response({"status": "started"})
+
+
+@routes.post('/api/intel/stop')
+async def intel_stop(request: web.Request):
+    """Stop the running PromptIntelTeam."""
+    global intel_team, intel_task
+    if intel_task is not None and not intel_task.done():
+        intel_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(intel_task), timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    if intel_team is not None:
+        intel_team.running = False
+    logger.info("PromptIntelTeam stopped via API")
+    return web.json_response({"status": "stopped"})
+
+
 # ── App Factory ─────────────────────────────────────────────
 
 async def create_app():
@@ -735,6 +780,16 @@ async def create_app():
     graph = build_graph(saver)
 
     async def cleanup(app):
+        global intel_task, intel_team
+        # Stop intel team on shutdown
+        if intel_task is not None and not intel_task.done():
+            intel_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(intel_task), timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        if intel_team is not None:
+            intel_team.running = False
         await checkpointer_cm.__aexit__(None, None, None)
         print("👋 Shutting down...")
 
@@ -742,6 +797,12 @@ async def create_app():
 
     print(f"✅ Agent ready! Workspace: {config.WORKSPACE_DIR}")
     print(f"⚡ Socket.IO server on http://{config.HOST}:{config.PORT}")
+
+    # Auto-start the PromptIntelTeam
+    global intel_team, intel_task
+    intel_team = PromptIntelTeam(sio=sio)
+    intel_task = asyncio.create_task(intel_team.run_forever())
+    print("🔍 PromptIntelTeam started — mining CC source for prompt improvements")
 
     return app
 

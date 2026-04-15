@@ -22,6 +22,7 @@ const ALL_COMMANDS: SlashCommand[] = [
   { cmd: '/new',       desc: 'Start a new session', instant: true },
   { cmd: '/theme',     desc: 'Cycle color theme', instant: true },
   { cmd: '/exit',      desc: 'Exit ShadowDev', instant: true },
+  { cmd: '/intel',     desc: 'Start PromptIntel continuous improvement engine', instant: true },
 ];
 
 interface Props {
