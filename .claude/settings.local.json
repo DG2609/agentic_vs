@@ -17,7 +17,12 @@
       "Bash(git add:*)",
       "Bash(git commit -m ':*)",
       "Bash(cat)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(SHADOWDEV_SKIP_MCP_AT_IMPORT=1 python -m pytest tests/ -x --timeout=60)",
+      "Bash(SHADOWDEV_SKIP_MCP_AT_IMPORT=1 python -m pytest tests/ -x)",
+      "Bash(SHADOWDEV_SKIP_MCP_AT_IMPORT=1 python -m pytest tests/test_snapshots.py -v)",
+      "Bash(SHADOWDEV_SKIP_MCP_AT_IMPORT=1 python -m pytest tests/)",
+      "Bash(git push:*)"
     ]
   }
 }

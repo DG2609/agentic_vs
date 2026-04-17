@@ -92,7 +92,7 @@ export function useSocket(serverReady: boolean): UseSocketReturn {
                 ...m,
                 tools: m.tools.map(t =>
                   t.tool_id === data.tool_id
-                    ? { ...t, status: 'done' as const, output: data.result, elapsed_ms: data.elapsed_ms }
+                    ? { ...t, status: 'completed' as const, output: data.result, elapsed_ms: data.elapsed_ms }
                     : t
                 ),
               }

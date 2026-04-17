@@ -9,11 +9,11 @@ Supports:
 
 import os
 import sqlite3
-import threading
 import time
 import fnmatch
 import logging
 import asyncio
+import contextvars
 from typing import Optional, Callable, Awaitable
 
 import config
@@ -65,56 +65,55 @@ def set_permission_callback(cb: Optional[Callable[..., Awaitable[str]]]) -> None
 _MAX_CONSECUTIVE_DENIALS = 3
 _MAX_TOTAL_DENIALS = 20
 
-_denial_state = threading.local()
-
-
-def _get_counters():
-    """Get (or initialize) per-thread denial counters."""
-    if not hasattr(_denial_state, 'consecutive'):
-        _denial_state.consecutive = 0
-        _denial_state.total = 0
-    return _denial_state
+# ContextVar is async-safe: isolated per asyncio.Task, propagates through
+# await boundaries. threading.local would reset unpredictably under the
+# event loop and could bypass denial tracking.
+_consecutive_denials: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "shadowdev_consecutive_denials", default=0
+)
+_total_denials: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "shadowdev_total_denials", default=0
+)
 
 
 def record_denial() -> dict:
     """Increment denial counters. Returns {consecutive, total, bypass_active}."""
-    s = _get_counters()
-    s.consecutive += 1
-    s.total += 1
+    consecutive = _consecutive_denials.get() + 1
+    total = _total_denials.get() + 1
+    _consecutive_denials.set(consecutive)
+    _total_denials.set(total)
     bypass = (
-        s.consecutive >= _MAX_CONSECUTIVE_DENIALS
-        or s.total >= _MAX_TOTAL_DENIALS
+        consecutive >= _MAX_CONSECUTIVE_DENIALS
+        or total >= _MAX_TOTAL_DENIALS
     )
     if bypass:
         logger.warning(
             f"[permissions] denial limit reached "
-            f"(consecutive={s.consecutive}, total={s.total}) — auto-allowing"
+            f"(consecutive={consecutive}, total={total}) — auto-allowing"
         )
     return {
-        "consecutive": s.consecutive,
-        "total": s.total,
+        "consecutive": consecutive,
+        "total": total,
         "bypass_active": bypass,
     }
 
 
 def record_allow() -> None:
     """Reset consecutive denial counter on a successful allow."""
-    _get_counters().consecutive = 0
+    _consecutive_denials.set(0)
 
 
 def reset_denial_counters() -> None:
     """Reset all denial counters (call at session start)."""
-    s = _get_counters()
-    s.consecutive = 0
-    s.total = 0
+    _consecutive_denials.set(0)
+    _total_denials.set(0)
 
 
 def is_denial_bypass_active() -> bool:
     """True when denial thresholds are exceeded and agent should auto-allow."""
-    s = _get_counters()
     return (
-        s.consecutive >= _MAX_CONSECUTIVE_DENIALS
-        or s.total >= _MAX_TOTAL_DENIALS
+        _consecutive_denials.get() >= _MAX_CONSECUTIVE_DENIALS
+        or _total_denials.get() >= _MAX_TOTAL_DENIALS
     )
 
 

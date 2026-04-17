@@ -11,6 +11,7 @@ import FileTree, { SearchPanel, ToolsPanel, GitPanel } from '@/components/file-t
 import CodeEditor from '@/components/code-editor';
 import ChatPanel from '@/components/chat-panel';
 import StatusBar from '@/components/status-bar';
+import ErrorBoundary from '@/components/error-boundary';
 
 export default function IDEPage() {
   // ── State ──────────────────────────────────────────────────
@@ -18,6 +19,7 @@ export default function IDEPage() {
   const [chatOpen, setChatOpen] = useState(true);
   const [connected, setConnected] = useState(false);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
+  const [toolCount, setToolCount] = useState<number | undefined>(undefined);
   const [isStreaming, setIsStreaming] = useState(false);
   const [threadId, setThreadId] = useState(() => crypto.randomUUID());
   const [chatMode, setChatMode] = useState<'chat' | 'plan' | 'code'>('code');
@@ -33,7 +35,7 @@ export default function IDEPage() {
   // Chat
   const [messages, setMessages] = useState<ChatMessage[]>([{
     role: 'assistant',
-    content: '👋 Hi! I have **27 tools** at my disposal — code analysis, web search, task tracking, planning, and more. Ask me anything!',
+    content: '👋 Hi! I have code analysis, web search, task tracking, planning, and many more tools at my disposal. Ask me anything!',
     timestamp: new Date(),
     tools: [],
   }]);
@@ -54,6 +56,12 @@ export default function IDEPage() {
     const socket = getSocket();
 
     socket.on('connect', () => setConnected(true));
+    socket.on('disconnect', () => setConnected(false));
+    socket.on('connect_error', (err: Error) => {
+      setConnected(false);
+      // eslint-disable-next-line no-console
+      console.warn('[socket] connect_error:', err.message);
+    });
     socket.on('text', (data: { content: string }) => {
       contentBufferRef.current += data.content;
 
@@ -170,6 +178,10 @@ export default function IDEPage() {
   // ── Init ───────────────────────────────────────────────────
   useEffect(() => {
     api.getModelInfo().then(setModelInfo).catch(() => { });
+    // Fetch real tool count from /health — avoids hard-coded drift.
+    api.getHealth()
+      .then((h) => { if (typeof h?.tool_count === 'number') setToolCount(h.tool_count); })
+      .catch(() => { });
     loadRootFiles();
   }, [loadRootFiles]);
 
@@ -358,18 +370,20 @@ export default function IDEPage() {
           onRejectDiff={rejectDiff} />
 
         {chatOpen && (
-          <ChatPanel
-            messages={messages} inputValue={inputValue}
-            onInputChange={setInputValue} onSend={sendMessage} onStop={stopGeneration}
-            onNewConversation={newConversation} onClose={() => setChatOpen(false)}
-            isStreaming={isStreaming} connected={connected}
-            modelInfo={modelInfo} contentBuffer={contentBufferRef.current}
-            onApplyCode={handleApplyCode}
-            mode={chatMode} onModeChange={setChatMode} />
+          <ErrorBoundary>
+            <ChatPanel
+              messages={messages} inputValue={inputValue}
+              onInputChange={setInputValue} onSend={sendMessage} onStop={stopGeneration}
+              onNewConversation={newConversation} onClose={() => setChatOpen(false)}
+              isStreaming={isStreaming} connected={connected}
+              modelInfo={modelInfo} contentBuffer={contentBufferRef.current}
+              onApplyCode={handleApplyCode}
+              mode={chatMode} onModeChange={setChatMode} />
+          </ErrorBoundary>
         )}
       </div>
 
-      <StatusBar connected={connected} modelInfo={modelInfo} />
+      <StatusBar connected={connected} modelInfo={modelInfo} toolCount={toolCount} />
     </div>
   );
 }

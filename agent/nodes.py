@@ -9,6 +9,7 @@ Upgraded with:
 - AGENTS.md / project rules injection
 - Doom loop detection
 """
+import asyncio
 import os
 import json
 import logging
@@ -155,9 +156,24 @@ _SESSION_MEMORY_INTERVAL = int(os.environ.get("SHADOWDEV_SESSION_MEMORY_INTERVAL
 _session_memory_turn: int = 0  # module-level counter — turns since last extraction
 
 
+def _log_background_task_error(name: str):
+    """Return a done_callback that logs exceptions from fire-and-forget tasks.
+
+    Without this, asyncio swallows exceptions from ensure_future() tasks
+    whose result is never awaited, making background feature failures
+    effectively invisible during debugging.
+    """
+    def _cb(task: "asyncio.Task") -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(f"[background:{name}] task failed: {exc!r}")
+    return _cb
+
+
 async def _extract_session_memory(messages: list, workspace: str) -> None:
     """Background extraction of session memory — runs as fire-and-forget."""
-    import asyncio
     from pathlib import Path
     from langchain_core.messages import HumanMessage as _HM, SystemMessage as _SM
 
@@ -540,7 +556,6 @@ async def _invoke_with_retry(llm, messages: list, max_retries: int = _RETRY_MAX_
     - 529 Overloaded: max 3 retries regardless of max_retries
     - 429 Rate-limit, 503, 502, timeout, connection: up to max_retries
     """
-    import asyncio
     import traceback as _tb
 
     overload_count = 0
@@ -1096,22 +1111,25 @@ async def agent_node(state: AgentState, llm_planner, llm_coder) -> dict:
     global _session_memory_turn
     _session_memory_turn += 1
     if _session_memory_turn % _SESSION_MEMORY_INTERVAL == 0:
-        import asyncio
         try:
-            asyncio.ensure_future(_extract_session_memory(
+            task = asyncio.ensure_future(_extract_session_memory(
                 list(state.messages),
                 state.workspace or config.WORKSPACE_DIR or ".",
             ))
-        except Exception:
-            pass  # extraction must never crash the agent
+            task.add_done_callback(_log_background_task_error("session_memory"))
+        except Exception as e:
+            # scheduling (not execution) failure — log but never crash agent
+            logger.warning(f"[background] failed to schedule session memory: {e}")
 
     # ── Auto Dream memory consolidation (fire-and-forget every 50 turns) ──
     try:
         from agent.auto_dream import run_auto_dream
-        import asyncio as _aio
-        _aio.ensure_future(run_auto_dream(list(state.messages), _session_memory_turn, llm))
-    except Exception:
-        pass  # auto dream must never crash the agent
+        task = asyncio.ensure_future(
+            run_auto_dream(list(state.messages), _session_memory_turn, llm)
+        )
+        task.add_done_callback(_log_background_task_error("auto_dream"))
+    except Exception as e:
+        logger.warning(f"[background] failed to schedule auto_dream: {e}")
 
     return result
 

@@ -7,6 +7,7 @@ Supported operations:
     set  — update a config value for the current session (in-memory only)
     list — show all configurable settings with current values and descriptions
 """
+import difflib
 import logging
 from typing import Any
 
@@ -124,11 +125,16 @@ def config_set(key: str, value: str) -> str:
     """
     key = key.strip().upper()
     if key not in _MUTABLE_SETTINGS:
-        allowed = ", ".join(sorted(_MUTABLE_SETTINGS))
-        return (
-            f"'{key}' is not a mutable setting.\n"
-            f"Mutable settings: {allowed}"
+        # Offer typo-tolerant suggestions — surface the closest keys instead
+        # of dumping every mutable setting on a typo.
+        suggestions = difflib.get_close_matches(
+            key, list(_MUTABLE_SETTINGS), n=3, cutoff=0.5
         )
+        if suggestions:
+            hint = " Did you mean: " + ", ".join(suggestions) + "?"
+        else:
+            hint = " Run `/config` (no args) to see all mutable settings."
+        return f"'{key}' is not a mutable setting.{hint}"
 
     meta = _MUTABLE_SETTINGS[key]
     expected_type = meta["type"]

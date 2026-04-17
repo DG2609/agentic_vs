@@ -1036,32 +1036,7 @@ class ShadowDevTUI(App):
 
                 # Streaming text
                 if kind == "on_chat_model_stream":
-                    # Transition: first token means we moved from "thinking" to
-                    # actively streaming a response.
-                    if self._agent_status == "thinking":
-                        self._agent_status = "running"
-                        sb.busy_label = "working..."
-
-                    chunk = data.get("chunk")
-                    if chunk and hasattr(chunk, "content") and chunk.content:
-                        content = chunk.content
-                        if isinstance(content, str):
-                            buffer += content
-                        elif isinstance(content, list):
-                            for block in content:
-                                if isinstance(block, str):
-                                    buffer += block
-                                elif isinstance(block, dict) and block.get("type") == "text":
-                                    buffer += block["text"]
-
-                        # Progressive render: flush on double newline
-                        if "\n\n" in buffer:
-                            parts = buffer.rsplit("\n\n", 1)
-                            to_render = parts[0]
-                            buffer = parts[1] if len(parts) > 1 else ""
-                            clean = self._clean_buffer(to_render)
-                            if clean:
-                                chat.write(Markdown(_preprocess_markdown(clean)))
+                    buffer = self._process_stream_chunk(data, buffer, chat, sb)
 
                 # Token/cost tracking — debounced via schedule_update (max 5 fps)
                 elif kind == "on_chat_model_end":
@@ -1164,34 +1139,8 @@ class ShadowDevTUI(App):
                                     self.modified_files.append(target)
                                     sidebar.add_file(target)
 
-                    # Show diffs inline
-                    if tool_name in ("file_edit", "file_write"):
-                        out_str = output if isinstance(output, str) else (
-                            output.content if hasattr(output, "content") else str(output)
-                        )
-                        if "Diff:" in out_str:
-                            diff_str = out_str.split("Diff:", 1)[1].strip()[:600]
-                            target = a.get("file_path", "file")
-                            chat.write(Text(
-                                f"  Edit: {_short_path(target)} ({elapsed_str})",
-                                style="green",
-                            ))
-                            chat.write(Syntax(diff_str, "diff", theme="monokai", line_numbers=False))
-
-                    # Show terminal output
-                    elif tool_name == "terminal_exec":
-                        out_str = output if isinstance(output, str) else (
-                            output.content if hasattr(output, "content") else str(output)
-                        )
-                        cmd = a.get("command", "")
-                        chat.write(Text(f"  $ {cmd} ({elapsed_str})", style="green"))
-                        if out_str.strip():
-                            lines = out_str.strip().split("\n")[:6]
-                            for line in lines:
-                                chat.write(Text(f"    {line}", style="dim"))
-                            total = len(out_str.strip().split("\n"))
-                            if total > 6:
-                                chat.write(Text(f"    ... ({total - 6} more lines)", style="dim"))
+                    # Render inline output for file/terminal tools
+                    self._render_tool_output(tool_name, a, output, elapsed_str, chat)
 
             # Flush remaining buffer
             if buffer.strip():
@@ -1302,17 +1251,95 @@ class ShadowDevTUI(App):
         except Exception:
             pass
 
+    # ── Agent execution helpers ────────────────────────────
+    # Extracted from _run_agent to keep the streaming loop readable and
+    # individually testable.
+
+    def _process_stream_chunk(self, data: dict, buffer: str, chat, sb) -> str:
+        """Accumulate on_chat_model_stream chunks into buffer, flushing on
+        paragraph boundaries. Returns the updated buffer (trailing partial
+        paragraph).
+        """
+        if self._agent_status == "thinking":
+            self._agent_status = "running"
+            sb.busy_label = "working..."
+
+        chunk = data.get("chunk")
+        if not (chunk and hasattr(chunk, "content") and chunk.content):
+            return buffer
+
+        content = chunk.content
+        if isinstance(content, str):
+            buffer += content
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, str):
+                    buffer += block
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    buffer += block["text"]
+
+        # Progressive render: flush stable text (everything up to the last
+        # blank line) and keep the trailing unfinished paragraph buffered.
+        if "\n\n" in buffer:
+            parts = buffer.rsplit("\n\n", 1)
+            to_render = parts[0]
+            buffer = parts[1] if len(parts) > 1 else ""
+            clean = self._clean_buffer(to_render)
+            if clean:
+                chat.write(Markdown(_preprocess_markdown(clean)))
+        return buffer
+
+    def _render_tool_output(
+        self, tool_name: str, args: dict, output, elapsed_str: str, chat
+    ) -> None:
+        """Render inline output for file-edit and terminal tools after a
+        tool call completes. No-op for tools handled elsewhere.
+        """
+        def _to_str(o) -> str:
+            if isinstance(o, str):
+                return o
+            return o.content if hasattr(o, "content") else str(o)
+
+        if tool_name in ("file_edit", "file_write"):
+            out_str = _to_str(output)
+            if "Diff:" in out_str:
+                diff_str = out_str.split("Diff:", 1)[1].strip()[:600]
+                target = args.get("file_path", "file")
+                chat.write(Text(
+                    f"  Edit: {_short_path(target)} ({elapsed_str})",
+                    style="green",
+                ))
+                chat.write(Syntax(diff_str, "diff", theme="monokai", line_numbers=False))
+            return
+
+        if tool_name == "terminal_exec":
+            out_str = _to_str(output)
+            cmd = args.get("command", "")
+            chat.write(Text(f"  $ {cmd} ({elapsed_str})", style="green"))
+            if out_str.strip():
+                lines = out_str.strip().split("\n")
+                for line in lines[:6]:
+                    chat.write(Text(f"    {line}", style="dim"))
+                if len(lines) > 6:
+                    chat.write(Text(f"    ... ({len(lines) - 6} more lines)", style="dim"))
+
     # ── Utilities ──────────────────────────────────────────
 
+    # Stream-leaked tool-call JSON appears at the start of a line (fence
+    # or raw), never embedded inside a user sentence. Anchor to line-start
+    # so legitimate JSON the user paste-discusses mid-paragraph survives.
+    _TOOL_JSON_FENCE_RE = re.compile(
+        r'^```json\s*\{\s*"name"[\s\S]*?(?:```|\Z)',
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    _TOOL_JSON_RAW_RE = re.compile(
+        r'^\s*\{\s*"name"\s*:\s*"[A-Za-z0-9_]+"\s*,\s*"arguments"\s*:\s*\{[\s\S]*?\}\s*\}',
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+
     def _clean_buffer(self, buffer: str) -> str:
-        clean = buffer
-        clean = re.sub(
-            r'```json\s*\{\s*"name"[\s\S]*?(?:```|$)', '', clean, flags=re.IGNORECASE
-        )
-        clean = re.sub(
-            r'\{\s*"name"\s*:\s*"[^"]+\"[\s\S]*?"arguments"\s*:[\s\S]*?(?:\}|$)',
-            '', clean, flags=re.IGNORECASE,
-        )
+        clean = self._TOOL_JSON_FENCE_RE.sub('', buffer)
+        clean = self._TOOL_JSON_RAW_RE.sub('', clean)
         stripped = clean.strip()
         if stripped in ("{", "}", "{}", "{\n}", "{\n  \n}"):
             return ""

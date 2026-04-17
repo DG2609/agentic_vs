@@ -73,6 +73,13 @@ def _preprocess_markdown(text: str) -> str:
     return re.sub(r'(?<!~)~(\d+(?:\.\d+)?)~(?!~)', r'\1', text)
 
 
+# Safety ceiling on the streaming buffer. Beyond this size, re-rendering
+# markdown on every chunk becomes O(n²) and rapidly degrades the UX.
+# When the cap is hit we stop re-rendering; content still accumulates but
+# the Live display freezes until the final flush.
+_MAX_STREAM_BUFFER_BYTES = int(os.environ.get("SHADOWDEV_MAX_STREAM_BUFFER", "500000"))
+
+
 def _setup_json_logging(thread_id: str) -> None:
     """Wire up per-session JSON line log file and prune logs older than 7 days."""
     log_dir = Path.home() / ".shadowdev" / "logs"
@@ -249,10 +256,21 @@ def _tool_display(tool_name: str, args: dict) -> tuple:
         sym = args.get("symbol", args.get("file_path", ""))
         return icon, f'{base} "{sym}"'
     elif tool_name in ("task_explore", "task_general"):
-        task_desc = str(args.get("task", ""))[:60]
+        task_desc = _smart_truncate(str(args.get("task", "")), 60)
         return icon, f'{base}: "{task_desc}"'
     else:
         return icon, f"{base}"
+
+
+def _smart_truncate(text: str, limit: int) -> str:
+    """Truncate at word boundary with ellipsis, avoiding mid-word cuts."""
+    if len(text) <= limit:
+        return text
+    # Try to break at last whitespace before limit
+    cutoff = text.rfind(" ", 0, limit - 1)
+    if cutoff <= limit // 2:  # no decent break — hard cut
+        cutoff = limit - 1
+    return text[:cutoff].rstrip() + "…"
 
 
 def _short_path(p: str) -> str:
@@ -715,11 +733,15 @@ async def chat_loop(resume_id: str = None):
                         import config as _cfg
                         old = _cfg.LLM_PROVIDER
                         _cfg.LLM_PROVIDER = new_provider
-                        # Rebuild graph with new provider
+                        # Rebuild graph with new provider — reuse existing
+                        # checkpointer so the active session history survives
+                        # the switch (otherwise /provider wipes conversation).
                         from agent.graph import build_graph as _bg
-                        from langgraph.checkpoint.memory import MemorySaver as _MS
-                        graph = _bg(checkpointer=_MS())
-                        console.print(f"[dim]Provider: {old!r} → {new_provider!r}. Graph rebuilt.[/dim]")
+                        _existing_cp = getattr(graph, "checkpointer", None)
+                        if _existing_cp is None:
+                            _existing_cp = _make_checkpointer()
+                        graph = _bg(checkpointer=_existing_cp)
+                        console.print(f"[dim]Provider: {old!r} → {new_provider!r}. Graph rebuilt (session preserved).[/dim]")
                 continue
             elif input_text.startswith('/plan'):
                 active_agent_override = "planner"
@@ -857,7 +879,12 @@ async def run_agent(message: str, thread_id: str, active_agent: str = None, _ses
                                 buffer += block
                             elif isinstance(block, dict) and block.get("type") == "text":
                                 buffer += block["text"]
-                                
+
+                    # Skip re-rendering once buffer exceeds safety cap: protects
+                    # against O(n²) markdown re-render on very long responses.
+                    if len(buffer) > _MAX_STREAM_BUFFER_BYTES:
+                        continue
+
                     if _should_flush():
                         clean = buffer
                         clean = re.sub(r'```json\s*\{\s*"name"[\s\S]*?(?:```|$)', '', clean, flags=re.IGNORECASE)
@@ -1115,8 +1142,10 @@ if __name__ == "__main__":
         import config as _cfg
         _cfg.COORDINATOR_MODE = True
         from agent.graph import build_graph as _bg
-        from langgraph.checkpoint.memory import MemorySaver as _MS
-        graph = _bg(checkpointer=_MS())
+        # Preserve the module-level checkpointer so --team sessions still
+        # get SQLite persistence (not lost to a fresh MemorySaver).
+        _existing_cp = getattr(graph, "checkpointer", None) or _make_checkpointer()
+        graph = _bg(checkpointer=_existing_cp)
         console.print("[bold magenta]🤝 Coordinator mode active — leading agent team[/bold magenta]")
 
     if args.improve:

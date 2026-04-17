@@ -21,11 +21,10 @@ interface Props {
 export default function ToolBlock({ tool, onToggle }: Props) {
   const icon = TOOL_ICONS[tool.tool_name] ?? '⚙';
   const isRunning = tool.status === 'running';
-  const isDone = tool.status === 'done';
-  const isError = tool.status === 'error';
+  const isCompleted = tool.status === 'completed';
 
-  const statusColor = isRunning ? theme.yellow : isDone ? theme.green : theme.red;
-  const statusIcon = isRunning ? null : isDone ? '✓' : '✗';
+  const statusColor = isRunning ? theme.yellow : isCompleted ? theme.green : theme.red;
+  const statusIcon = isRunning ? null : isCompleted ? '✓' : '✗';
   const elapsed = tool.elapsed_ms ? ` ${(tool.elapsed_ms / 1000).toFixed(1)}s` : '';
 
   return (
@@ -54,7 +53,10 @@ export default function ToolBlock({ tool, onToggle }: Props) {
         <Box flexDirection="column" marginLeft={4} marginTop={0}>
           <Box borderStyle="single" borderColor={theme.border} paddingX={1}>
             <Text color={theme.textMuted} wrap="wrap">
-              {tool.output.slice(0, 800)}{tool.output.length > 800 ? '\n...' : ''}
+              {tool.output.slice(0, 800)}
+              {tool.output.length > 800
+                ? `\n… (+${tool.output.length - 800} chars truncated — open full output with the server log)`
+                : ''}
             </Text>
           </Box>
         </Box>

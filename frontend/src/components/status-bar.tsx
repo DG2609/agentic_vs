@@ -8,7 +8,7 @@ interface StatusBarProps {
     toolCount?: number;
 }
 
-export default function StatusBar({ connected, modelInfo, toolCount = 27 }: StatusBarProps) {
+export default function StatusBar({ connected, modelInfo, toolCount }: StatusBarProps) {
     return (
         <div className="h-6 flex items-center justify-between px-3 text-[10px] uppercase tracking-wider font-semibold flex-shrink-0 z-50 select-none"
             style={{ background: 'var(--bg-darkest)', borderTop: '1px solid var(--border)', color: 'var(--text-muted)' }}>
@@ -30,7 +30,7 @@ export default function StatusBar({ connected, modelInfo, toolCount = 27 }: Stat
             <div className="flex items-center gap-4 opacity-80 hover:opacity-100 transition-opacity">
                 <span className="flex items-center gap-1">
                     <span className="text-[12px]">🔧</span>
-                    <span style={{ fontFamily: 'var(--font-mono)' }}>{toolCount} TOOLS</span>
+                    <span style={{ fontFamily: 'var(--font-mono)' }}>{toolCount ?? '—'} TOOLS</span>
                 </span>
                 {modelInfo && <span className="uppercase" style={{ fontFamily: 'var(--font-mono)' }}>{modelInfo.provider}</span>}
             </div>

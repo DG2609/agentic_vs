@@ -364,6 +364,40 @@ class MCPClientManager:
         else:
             raise ValueError(f"MCP server {server_name!r}: unknown type {server_type!r}")
 
+    # ── Session wrapper ───────────────────────────────────────
+
+    async def _with_session(
+        self,
+        server_name: str,
+        op_name: str,
+        body,
+        *,
+        on_unsupported,
+        on_error,
+        **log_ctx,
+    ):
+        """Run ``body(session)`` inside a session, normalising error handling.
+
+        - ``AttributeError`` → session lacks the method: return ``on_unsupported``
+          (don't mark the server as degraded — the server is healthy, it just
+          doesn't support this capability).
+        - Any other exception → warn with op_name + log_ctx, mark degraded,
+          and return ``on_error(exc)``.
+        - Success → mark healthy and return body's return value.
+        """
+        try:
+            async with self._open_session(server_name) as session:
+                result = await body(session)
+                self._status[server_name] = "healthy"
+                return result
+        except AttributeError:
+            return on_unsupported
+        except Exception as exc:
+            suffix = " " + " ".join(f"{k}={v!r}" for k, v in log_ctx.items()) if log_ctx else ""
+            logger.warning("[mcp] %s '%s' failed:%s %s", op_name, server_name, suffix, exc)
+            self._status[server_name] = "degraded"
+            return on_error(exc)
+
     # ── Resources ─────────────────────────────────────────────
 
     async def list_resources(self, server_name: str) -> list[dict]:
@@ -372,48 +406,44 @@ class MCPClientManager:
         Returns a list of dicts with keys: uri, name, description, mimeType.
         Returns a sentinel list if the server doesn't support resources.
         """
-        try:
-            async with self._open_session(server_name) as session:
-                response = await session.list_resources()
-                result = []
-                for r in getattr(response, "resources", []):
-                    result.append({
-                        "uri": str(getattr(r, "uri", "")),
-                        "name": str(getattr(r, "name", "")),
-                        "description": str(getattr(r, "description", "") or ""),
-                        "mimeType": str(getattr(r, "mimeType", "") or ""),
-                    })
-                self._status[server_name] = "healthy"
-                return result
-        except AttributeError:
-            # Session doesn't expose list_resources
-            return [{"error": _NOT_SUPPORTED}]
-        except Exception as exc:
-            logger.warning("[mcp] list_resources '%s' failed: %s", server_name, exc)
-            self._status[server_name] = "degraded"
-            return [{"error": str(exc)}]
+        async def _body(session):
+            response = await session.list_resources()
+            return [
+                {
+                    "uri": str(getattr(r, "uri", "")),
+                    "name": str(getattr(r, "name", "")),
+                    "description": str(getattr(r, "description", "") or ""),
+                    "mimeType": str(getattr(r, "mimeType", "") or ""),
+                }
+                for r in getattr(response, "resources", [])
+            ]
+
+        return await self._with_session(
+            server_name, "list_resources", _body,
+            on_unsupported=[{"error": _NOT_SUPPORTED}],
+            on_error=lambda exc: [{"error": str(exc)}],
+        )
 
     async def read_resource(self, server_name: str, uri: str) -> str:
         """Read a resource by URI. Returns text content (or base64 blob fallback)."""
-        try:
-            async with self._open_session(server_name) as session:
-                response = await session.read_resource(uri)
-                parts = []
-                for content in getattr(response, "contents", []):
-                    if hasattr(content, "text") and content.text is not None:
-                        parts.append(content.text)
-                    elif hasattr(content, "blob") and content.blob is not None:
-                        parts.append(f"[blob:{getattr(content, 'mimeType', 'application/octet-stream')}]")
-                    else:
-                        parts.append(str(content))
-                self._status[server_name] = "healthy"
-                return "\n".join(parts) if parts else "(no content)"
-        except AttributeError:
-            return _NOT_SUPPORTED
-        except Exception as exc:
-            logger.warning("[mcp] read_resource '%s' uri=%r failed: %s", server_name, uri, exc)
-            self._status[server_name] = "degraded"
-            return f"[MCP error: {exc}]"
+        async def _body(session):
+            response = await session.read_resource(uri)
+            parts = []
+            for content in getattr(response, "contents", []):
+                if hasattr(content, "text") and content.text is not None:
+                    parts.append(content.text)
+                elif hasattr(content, "blob") and content.blob is not None:
+                    parts.append(f"[blob:{getattr(content, 'mimeType', 'application/octet-stream')}]")
+                else:
+                    parts.append(str(content))
+            return "\n".join(parts) if parts else "(no content)"
+
+        return await self._with_session(
+            server_name, "read_resource", _body,
+            on_unsupported=_NOT_SUPPORTED,
+            on_error=lambda exc: f"[MCP error: {exc}]",
+            uri=uri,
+        )
 
     # ── Prompts ───────────────────────────────────────────────
 
@@ -422,58 +452,54 @@ class MCPClientManager:
 
         Returns a list of dicts with keys: name, description, arguments.
         """
-        try:
-            async with self._open_session(server_name) as session:
-                response = await session.list_prompts()
-                result = []
-                for p in getattr(response, "prompts", []):
-                    args = []
-                    for a in getattr(p, "arguments", []) or []:
-                        args.append({
-                            "name": str(getattr(a, "name", "")),
-                            "description": str(getattr(a, "description", "") or ""),
-                            "required": bool(getattr(a, "required", False)),
-                        })
-                    result.append({
-                        "name": str(getattr(p, "name", "")),
-                        "description": str(getattr(p, "description", "") or ""),
-                        "arguments": args,
-                    })
-                self._status[server_name] = "healthy"
-                return result
-        except AttributeError:
-            return [{"error": _NOT_SUPPORTED}]
-        except Exception as exc:
-            logger.warning("[mcp] list_prompts '%s' failed: %s", server_name, exc)
-            self._status[server_name] = "degraded"
-            return [{"error": str(exc)}]
+        async def _body(session):
+            response = await session.list_prompts()
+            result = []
+            for p in getattr(response, "prompts", []):
+                args = [
+                    {
+                        "name": str(getattr(a, "name", "")),
+                        "description": str(getattr(a, "description", "") or ""),
+                        "required": bool(getattr(a, "required", False)),
+                    }
+                    for a in (getattr(p, "arguments", []) or [])
+                ]
+                result.append({
+                    "name": str(getattr(p, "name", "")),
+                    "description": str(getattr(p, "description", "") or ""),
+                    "arguments": args,
+                })
+            return result
+
+        return await self._with_session(
+            server_name, "list_prompts", _body,
+            on_unsupported=[{"error": _NOT_SUPPORTED}],
+            on_error=lambda exc: [{"error": str(exc)}],
+        )
 
     async def get_prompt(self, server_name: str, prompt_name: str, arguments: dict | None = None) -> str:
         """Get a rendered prompt template. Returns the messages as plain text."""
         if arguments is None:
             arguments = {}
-        try:
-            async with self._open_session(server_name) as session:
-                response = await session.get_prompt(prompt_name, arguments)
-                parts = []
-                for msg in getattr(response, "messages", []):
-                    role = getattr(msg, "role", "")
-                    content_obj = getattr(msg, "content", None)
-                    if content_obj is None:
-                        continue
-                    if hasattr(content_obj, "text"):
-                        text = content_obj.text
-                    else:
-                        text = str(content_obj)
-                    parts.append(f"[{role}] {text}")
-                self._status[server_name] = "healthy"
-                return "\n".join(parts) if parts else "(empty prompt)"
-        except AttributeError:
-            return _NOT_SUPPORTED
-        except Exception as exc:
-            logger.warning("[mcp] get_prompt '%s' prompt=%r failed: %s", server_name, prompt_name, exc)
-            self._status[server_name] = "degraded"
-            return f"[MCP error: {exc}]"
+
+        async def _body(session):
+            response = await session.get_prompt(prompt_name, arguments)
+            parts = []
+            for msg in getattr(response, "messages", []):
+                role = getattr(msg, "role", "")
+                content_obj = getattr(msg, "content", None)
+                if content_obj is None:
+                    continue
+                text = content_obj.text if hasattr(content_obj, "text") else str(content_obj)
+                parts.append(f"[{role}] {text}")
+            return "\n".join(parts) if parts else "(empty prompt)"
+
+        return await self._with_session(
+            server_name, "get_prompt", _body,
+            on_unsupported=_NOT_SUPPORTED,
+            on_error=lambda exc: f"[MCP error: {exc}]",
+            prompt=prompt_name,
+        )
 
     # ── Health check loop ─────────────────────────────────────
 

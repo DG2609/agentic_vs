@@ -1,9 +1,12 @@
+import logging
 import os
 import re
 from typing import List, Dict
 from langchain_core.tools import tool
 import config
 from agent.tools.truncation import truncate_output
+
+logger = logging.getLogger(__name__)
 
 # Helper to find definitions using AST/Regex heuristics
 def _find_definition_regex(workspace: str, symbol: str) -> List[Dict]:
@@ -27,7 +30,8 @@ def _find_definition_regex(workspace: str, symbol: str) -> List[Dict]:
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
-            except:
+            except (OSError, UnicodeDecodeError) as e:
+                logger.debug(f"lsp_go_to_definition: skip {path}: {e}")
                 continue
 
             for pattern in patterns:
@@ -95,7 +99,8 @@ def lsp_find_references(symbol: str) -> str:
             try:
                 with open(path, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
-            except:
+            except (OSError, UnicodeDecodeError) as e:
+                logger.debug(f"lsp_find_references: skip {path}: {e}")
                 continue
 
             file_matches = []

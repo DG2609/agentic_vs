@@ -40,31 +40,43 @@ export default function ChatPanel({
     }, [messages, contentBuffer]);
 
     return (
-        <div className="flex flex-col flex-shrink-0 transition-all font-sans"
+        <aside className="flex flex-col flex-shrink-0 transition-all font-sans"
+            aria-label="AI Chat Panel"
             style={{ width: '400px', background: 'var(--bg-panel)', borderLeft: '1px solid var(--border)' }}>
 
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-2.5 flex-shrink-0"
+                role="toolbar"
+                aria-label="Chat controls"
                 style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg-panel)' }}>
                 <div className="flex items-center gap-2 text-[12px] font-medium" style={{ color: 'var(--text-primary)' }}>
                     <span>AI Chat</span>
-                    <span className={`w-1.5 h-1.5 rounded-full transition-all`}
+                    <span className="w-1.5 h-1.5 rounded-full transition-all"
+                        role="status"
+                        aria-label={connected ? 'Connected' : 'Disconnected'}
                         style={{ background: connected ? 'var(--text-muted)' : 'var(--red)' }} />
                 </div>
                 <div className="flex items-center gap-1">
-                    <button onClick={onNewConversation} title="New Conversation (Ctrl+N)"
+                    <button onClick={onNewConversation}
+                        title="New Conversation (Ctrl+N)"
+                        aria-label="Start new conversation"
                         className="w-7 h-7 rounded-md flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all">
-                        <FiPlus size={16} />
+                        <FiPlus size={16} aria-hidden="true" />
                     </button>
-                    <button onClick={onClose} title="Close (Ctrl+Shift+I)"
+                    <button onClick={onClose}
+                        title="Close (Ctrl+Shift+I)"
+                        aria-label="Close chat panel"
                         className="w-7 h-7 rounded-md flex items-center justify-center text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all">
-                        <FiX size={14} />
+                        <FiX size={14} aria-hidden="true" />
                     </button>
                 </div>
             </div>
 
-            {/* Messages */}
-            <div className="flex-1 overflow-y-auto px-3 py-3 scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent">
+            {/* Messages — aria-live=polite announces streamed text to screen readers. */}
+            <div className="flex-1 overflow-y-auto px-3 py-3 scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent"
+                role="log"
+                aria-live="polite"
+                aria-atomic="false">
                 <div className="flex flex-col gap-4">
                     {messages.map((msg, i) => (
                         <ChatMessageItem
@@ -85,9 +97,10 @@ export default function ChatPanel({
             <div className="px-4 pb-4 pt-2 flex-shrink-0 relative">
                 {isStreaming && (
                     <button onClick={onStop}
+                        aria-label="Stop generating response"
                         className="w-full flex items-center justify-center gap-1.5 py-1.5 mb-2 rounded-md text-[12px] font-medium transition-all hover:bg-[var(--bg-hover)]"
                         style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}>
-                        <FiSquare size={12} /> Stop generating
+                        <FiSquare size={12} aria-hidden="true" /> Stop generating
                     </button>
                 )}
 
@@ -129,13 +142,16 @@ export default function ChatPanel({
                         }}
                         placeholder={connected ? "Ask anything..." : "Connecting..."}
                         disabled={!connected}
+                        aria-label="Chat message"
                         rows={1}
                         className="flex-1 resize-none outline-none text-[13px] leading-relaxed max-h-[150px] disabled:opacity-50"
                         style={{ background: 'none', color: 'var(--text-primary)', fontFamily: 'var(--font-sans)' }} />
-                    <button onClick={onSend} disabled={isStreaming || !inputValue.trim() || !connected}
+                    <button onClick={onSend}
+                        disabled={isStreaming || !inputValue.trim() || !connected}
+                        aria-label="Send message"
                         className="w-7 h-7 rounded-md flex items-center justify-center transition-all flex-shrink-0 disabled:opacity-30 disabled:cursor-not-allowed hover:opacity-90 active:scale-95"
                         style={{ background: 'var(--text-primary)', color: 'var(--bg-editor)' }}>
-                        <FiSend size={14} />
+                        <FiSend size={14} aria-hidden="true" />
                     </button>
                 </div>
                 <div className="flex justify-between items-center mt-2 px-1">
@@ -143,10 +159,13 @@ export default function ChatPanel({
                         {modelInfo ? `${modelInfo.model}` : ''}
                     </div>
                     <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                        Return to send
+                        <kbd className="px-1 py-0.5 rounded text-[9px]"
+                            style={{ background: 'var(--bg-editor)', border: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>↵</kbd> to send,{' '}
+                        <kbd className="px-1 py-0.5 rounded text-[9px]"
+                            style={{ background: 'var(--bg-editor)', border: '1px solid var(--border)', fontFamily: 'var(--font-mono)' }}>⇧↵</kbd> for newline
                     </div>
                 </div>
             </div>
-        </div>
+        </aside>
     );
 }

@@ -48,6 +48,10 @@ const api = {
         const res = await fetch(`${BACKEND_URL}/api/model`);
         return res.json();
     },
+    async getHealth() {
+        const res = await fetch(`${BACKEND_URL}/health`);
+        return res.json();
+    },
     async searchFiles(query: string) {
         const res = await fetch(`${BACKEND_URL}/api/search?q=${encodeURIComponent(query)}`);
         return res.json();

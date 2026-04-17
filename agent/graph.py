@@ -152,7 +152,13 @@ _existing_names = _all_core_names | {t.name for t in _planner_skills + _coder_sk
 _plugin_planner, _plugin_coder = _get_plugin_tools(existing_names=_existing_names)
 
 # ── Load MCP server tools ────────────────────────────────────
-_mcp_planner_tools, _mcp_coder_tools = _load_mcp_tools(config.MCP_SERVERS)
+# MCP discovery can spawn subprocesses / dial remote servers — slow path on
+# cold import. Set SHADOWDEV_SKIP_MCP_AT_IMPORT=1 in tests/CI to defer.
+if os.environ.get("SHADOWDEV_SKIP_MCP_AT_IMPORT", "").lower() in ("1", "true", "yes"):
+    _mcp_planner_tools, _mcp_coder_tools = [], []
+    logger.info("[graph] MCP loading skipped at import (SHADOWDEV_SKIP_MCP_AT_IMPORT set)")
+else:
+    _mcp_planner_tools, _mcp_coder_tools = _load_mcp_tools(config.MCP_SERVERS)
 
 
 # ── Separate Tools for Swarm Roles ──────────────────────────

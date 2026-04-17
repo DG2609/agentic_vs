@@ -7,10 +7,15 @@ export interface Message {
   streaming?: boolean;
 }
 
+// Matches backend-emitted status values so ToolBlock UI state stays in
+// lockstep with server events (previously 'done' on CLI vs 'completed'
+// on web).
+export type ToolStatus = 'running' | 'completed' | 'error';
+
 export interface ToolCall {
   tool_id: string;
   tool_name: string;
-  status: 'running' | 'done' | 'error';
+  status: ToolStatus;
   input?: Record<string, unknown>;
   output?: string;
   elapsed_ms?: number;
@@ -27,7 +32,7 @@ export interface FileNode {
 export interface WorkerInfo {
   id: string;
   role: string;
-  status: 'idle' | 'running' | 'done' | 'error';
+  status: 'idle' | 'running' | 'completed' | 'done' | 'error';
 }
 
 export interface AppConfig {
