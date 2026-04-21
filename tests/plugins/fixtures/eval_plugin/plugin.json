@@ -1,0 +1,7 @@
+{
+  "name": "evalbad",
+  "version": "1.0.0",
+  "tools": ["t"],
+  "permissions": [],
+  "entry": "evalbad.tools"
+}

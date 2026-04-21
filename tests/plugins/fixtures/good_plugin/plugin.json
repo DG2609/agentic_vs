@@ -1,0 +1,7 @@
+{
+  "name": "good",
+  "version": "1.0.0",
+  "tools": ["say_hi"],
+  "permissions": ["net.http"],
+  "entry": "good.tools"
+}
