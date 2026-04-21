@@ -22,6 +22,8 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from agent.graph import build_graph
 from agent.team.prompt_intel import PromptIntelTeam
+from agent.team.quality_intel import QualityIntelTeam
+from agent.plugins.manager import PluginManager, PluginError
 from models.schemas import StreamChunk, ToolExecution
 import config
 
@@ -42,6 +44,13 @@ active_tasks: dict[str, asyncio.Task] = {}  # thread_id -> running task
 # PromptIntel global state
 intel_team: "PromptIntelTeam | None" = None
 intel_task: "asyncio.Task | None" = None
+
+# QualityIntel global state
+quality_team: "QualityIntelTeam | None" = None
+quality_task: "asyncio.Task | None" = None
+
+# Plugin manager global
+plugin_manager: "PluginManager | None" = None
 
 
 # ── Socket.IO Events ───────────────────────────────────────
@@ -715,6 +724,220 @@ async def intel_stop(request: web.Request):
     return web.json_response({"status": "stopped"})
 
 
+# ── QualityIntel Routes ────────────────────────────────────
+
+@routes.get('/api/quality/status')
+async def quality_status(request: web.Request):
+    """Return current QualityIntelTeam status."""
+    if quality_team is None:
+        return web.json_response({
+            "running": False, "converged": False, "round": 0,
+            "overall_score": 0, "total_improvements": 0, "scores": {},
+        })
+    return web.json_response(await quality_team.get_status())
+
+
+@routes.post('/api/quality/start')
+async def quality_start(request: web.Request):
+    """Start the QualityIntelTeam if not already running."""
+    global quality_team, quality_task
+    if quality_team is not None and quality_team.running:
+        return web.json_response({"status": "already_running", "round": quality_team.round})
+
+    quality_team = QualityIntelTeam(sio=sio)
+    quality_task = asyncio.create_task(quality_team.run_until_converged())
+    logger.info("QualityIntelTeam started via API")
+    return web.json_response({"status": "started"})
+
+
+@routes.post('/api/quality/stop')
+async def quality_stop(request: web.Request):
+    """Stop the running QualityIntelTeam."""
+    global quality_team, quality_task
+    if quality_task is not None and not quality_task.done():
+        quality_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(quality_task), timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    if quality_team is not None:
+        quality_team.running = False
+    logger.info("QualityIntelTeam stopped via API")
+    return web.json_response({"status": "stopped"})
+
+
+# ── Plugin Routes ──────────────────────────────────────────
+
+def _meta_to_dict(m) -> dict:
+    return {
+        "name": m.name, "version": m.version, "url": m.url, "sha256": m.sha256,
+        "author": m.author, "description": m.description, "category": m.category,
+        "tags": list(m.tags), "permissions": list(m.permissions),
+        "tool_count": m.tool_count, "size_bytes": m.size_bytes,
+        "signature": m.signature,
+    }
+
+
+def _installed_to_dict(r) -> dict:
+    return {
+        "name": r.name, "version": r.version, "status": r.status,
+        "score": r.score, "permissions": list(r.permissions),
+        "install_path": r.install_path,
+        "installed_at": r.installed_at, "last_audited_at": r.last_audited_at,
+        "last_error": r.last_error,
+    }
+
+
+def _report_to_dict(rep) -> dict:
+    return {
+        "score": rep.score,
+        "blocked": rep.blocked,
+        "issues": [
+            {"rule": i.rule, "message": i.message, "severity": i.severity,
+             "file": i.file, "line": i.line}
+            for i in rep.issues
+        ],
+        "blockers": [
+            {"rule": i.rule, "message": i.message, "severity": i.severity,
+             "file": i.file, "line": i.line}
+            for i in rep.blockers
+        ],
+    }
+
+
+@routes.get('/api/plugins')
+async def plugins_list(request: web.Request):
+    """List installed plugins."""
+    if plugin_manager is None:
+        return web.json_response({"plugins": []})
+    rows = plugin_manager.list_installed()
+    return web.json_response({"plugins": [_installed_to_dict(r) for r in rows]})
+
+
+@routes.get('/api/plugins/search')
+async def plugins_search(request: web.Request):
+    """Search the plugin hub by query (and optional category)."""
+    if plugin_manager is None:
+        return web.json_response({"results": []})
+    q = request.query.get("q", "").strip()
+    category = request.query.get("category") or None
+    try:
+        metas = await plugin_manager.search(q, category=category)
+        return web.json_response({"results": [_meta_to_dict(m) for m in metas]})
+    except Exception as e:
+        logger.error(f"Plugin search error: {e}", exc_info=True)
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.get('/api/plugins/inspect')
+async def plugins_inspect(request: web.Request):
+    """Fetch a single hub entry by name."""
+    if plugin_manager is None:
+        return web.json_response({"error": "plugin manager unavailable"}, status=503)
+    name = request.query.get("name", "").strip()
+    if not name:
+        return web.json_response({"error": "'name' query param required"}, status=400)
+    meta = await plugin_manager.inspect(name)
+    if meta is None:
+        return web.json_response({"error": f"plugin not found: {name}"}, status=404)
+    return web.json_response(_meta_to_dict(meta))
+
+
+@routes.post('/api/plugins/audit')
+async def plugins_audit(request: web.Request):
+    """Run a dry-run audit without installing."""
+    if plugin_manager is None:
+        return web.json_response({"error": "plugin manager unavailable"}, status=503)
+    payload = await request.json()
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "'name' is required"}, status=400)
+    await sio.emit("plugins:audit_start", {"name": name})
+    try:
+        report = await plugin_manager.audit(name, version=payload.get("version"))
+        data = _report_to_dict(report)
+        await sio.emit("plugins:audit_done", {"name": name, "report": data})
+        return web.json_response(data)
+    except PluginError as e:
+        await sio.emit("plugins:error", {"op": "audit", "name": name, "error": str(e)})
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"Plugin audit error: {e}", exc_info=True)
+        await sio.emit("plugins:error", {"op": "audit", "name": name, "error": str(e)})
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.post('/api/plugins/install')
+async def plugins_install(request: web.Request):
+    """Audit + install a plugin."""
+    if plugin_manager is None:
+        return web.json_response({"error": "plugin manager unavailable"}, status=503)
+    payload = await request.json()
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "'name' is required"}, status=400)
+    version = payload.get("version")
+    permissions = payload.get("permissions") or []
+    force = bool(payload.get("force", False))
+    if not isinstance(permissions, list):
+        return web.json_response({"error": "'permissions' must be a list"}, status=400)
+    try:
+        installed = await plugin_manager.install(
+            name, version=version, permissions=permissions, force=force,
+        )
+        data = _installed_to_dict(installed)
+        await sio.emit("plugins:installed", data)
+        return web.json_response(data)
+    except PluginError as e:
+        await sio.emit("plugins:error", {"op": "install", "name": name, "error": str(e)})
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"Plugin install error: {e}", exc_info=True)
+        await sio.emit("plugins:error", {"op": "install", "name": name, "error": str(e)})
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.post('/api/plugins/uninstall')
+async def plugins_uninstall(request: web.Request):
+    """Uninstall a plugin by name."""
+    if plugin_manager is None:
+        return web.json_response({"error": "plugin manager unavailable"}, status=503)
+    payload = await request.json()
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "'name' is required"}, status=400)
+    try:
+        await plugin_manager.uninstall(name)
+        await sio.emit("plugins:uninstalled", {"name": name})
+        return web.json_response({"status": "ok", "name": name})
+    except Exception as e:
+        logger.error(f"Plugin uninstall error: {e}", exc_info=True)
+        await sio.emit("plugins:error", {"op": "uninstall", "name": name, "error": str(e)})
+        return web.json_response({"error": str(e)}, status=500)
+
+
+@routes.post('/api/plugins/reload')
+async def plugins_reload(request: web.Request):
+    """Reload the runtime sandbox for an installed plugin."""
+    if plugin_manager is None:
+        return web.json_response({"error": "plugin manager unavailable"}, status=503)
+    payload = await request.json()
+    name = (payload.get("name") or "").strip()
+    if not name:
+        return web.json_response({"error": "'name' is required"}, status=400)
+    try:
+        tools = await plugin_manager.reload(name)
+        return web.json_response({"status": "ok", "name": name,
+                                  "tools": [t.name for t in tools]})
+    except PluginError as e:
+        await sio.emit("plugins:error", {"op": "reload", "name": name, "error": str(e)})
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception as e:
+        logger.error(f"Plugin reload error: {e}", exc_info=True)
+        await sio.emit("plugins:error", {"op": "reload", "name": name, "error": str(e)})
+        return web.json_response({"error": str(e)}, status=500)
+
+
 # ── App Factory ─────────────────────────────────────────────
 
 async def create_app():
@@ -771,6 +994,39 @@ async def create_app():
             return web.FileResponse(os.path.join(static_dir, 'index.html'))
         app.router.add_get('/', serve_index)
 
+    # Initialize Plugin Manager
+    global plugin_manager
+    _plugins_data = config.DATA_DIR / "plugins"
+    _plugins_data.mkdir(parents=True, exist_ok=True)
+    hub_index_url = getattr(config, "PLUGIN_HUB_INDEX_URL",
+                            os.environ.get("SHADOWDEV_PLUGIN_HUB_INDEX",
+                                           "https://plugins.shadowdev.dev/index.json"))
+    try:
+        plugin_manager = PluginManager(
+            hub_index_url=hub_index_url,
+            install_root=_plugins_data / "installed",
+            temp_root=_plugins_data / "tmp",
+            db_path=_plugins_data / "registry.db",
+            cache_dir=_plugins_data / "cache",
+        )
+        # Best-effort startup sweep
+        sweep = getattr(plugin_manager, "startup_sweep", None)
+        if sweep is not None:
+            try:
+                sweep()
+            except Exception as e:
+                logger.warning(f"Plugin startup sweep failed: {e}")
+        # Bind as singleton for the agent graph adapter
+        try:
+            from agent.plugins.manager import set_singleton
+            set_singleton(plugin_manager)
+        except Exception:
+            pass
+        print(f"🔌 PluginManager ready (hub={hub_index_url})")
+    except Exception as e:
+        logger.error(f"Failed to init PluginManager: {e}", exc_info=True)
+        plugin_manager = None
+
     # Initialize agent
     db_path = config.DATA_DIR / "graph.db"
     print(f"🚀 Building agent graph with SQLite persistence: {db_path}")
@@ -780,7 +1036,7 @@ async def create_app():
     graph = build_graph(saver)
 
     async def cleanup(app):
-        global intel_task, intel_team
+        global intel_task, intel_team, quality_task, quality_team
         # Stop intel team on shutdown
         if intel_task is not None and not intel_task.done():
             intel_task.cancel()
@@ -790,6 +1046,22 @@ async def create_app():
                 pass
         if intel_team is not None:
             intel_team.running = False
+        # Stop quality team on shutdown
+        if quality_task is not None and not quality_task.done():
+            quality_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(quality_task), timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        if quality_team is not None:
+            quality_team.running = False
+        # Stop all plugin sandboxes on shutdown
+        if plugin_manager is not None:
+            for pname in list(plugin_manager._sandboxes.keys()):
+                try:
+                    await plugin_manager.unload(pname)
+                except Exception as e:
+                    logger.warning(f"Failed to unload plugin {pname}: {e}")
         await checkpointer_cm.__aexit__(None, None, None)
         print("👋 Shutting down...")
 
@@ -799,10 +1071,15 @@ async def create_app():
     print(f"⚡ Socket.IO server on http://{config.HOST}:{config.PORT}")
 
     # Auto-start the PromptIntelTeam
-    global intel_team, intel_task
+    global intel_team, intel_task, quality_team, quality_task
     intel_team = PromptIntelTeam(sio=sio)
     intel_task = asyncio.create_task(intel_team.run_forever())
     print("🔍 PromptIntelTeam started — mining CC source for prompt improvements")
+
+    # Auto-start the QualityIntelTeam
+    quality_team = QualityIntelTeam(sio=sio)
+    quality_task = asyncio.create_task(quality_team.run_until_converged())
+    print("🧪 QualityIntelTeam started — scanning project quality")
 
     return app
 

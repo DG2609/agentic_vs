@@ -36,11 +36,38 @@ class PluginManager:
         db_path: str | Path,
         cache_dir: str | Path,
     ) -> None:
+        self.install_root = Path(install_root)
         self.hub = HubScout(index_url=hub_index_url, cache_dir=cache_dir)
         self.installer = Installer(install_root=install_root, temp_root=temp_root)
         self.auditor = QualityAuditor()
         self.registry = PluginRegistryDB(db_path)
         self._sandboxes: dict[str, RuntimeSandbox] = {}
+
+    def startup_sweep(self) -> None:
+        """Reconcile on-disk install dirs with the registry DB.
+
+        - Removes install dirs that have no corresponding DB row (orphans).
+        - Marks DB rows whose install_path is missing as status='error'.
+        """
+        rows = {r.name: r for r in self.registry.list_all()}
+        # Orphan dirs: exist on disk but no matching DB row
+        if self.install_root.exists():
+            for entry in self.install_root.iterdir():
+                if not entry.is_dir():
+                    continue
+                # install dirs are named "<name>-<version>"
+                stem = entry.name.rsplit("-", 1)[0]
+                if stem not in rows:
+                    shutil.rmtree(entry, ignore_errors=True)
+        # Missing dirs: DB says installed but dir gone
+        for name, r in rows.items():
+            if r.install_path and not Path(r.install_path).exists():
+                self.registry.upsert(
+                    name=name, version=r.version, status="error",
+                    score=r.score, permissions=r.permissions,
+                    install_path=r.install_path,
+                    last_error="install directory missing",
+                )
 
     async def search(self, q: str, *, category: str | None = None) -> list[PluginMeta]:
         return await self.hub.search(q, category=category)
@@ -163,3 +190,19 @@ class _ProxyTool(BaseTool):
 
     async def _arun(self, *args, **kwargs):
         return await self.sb.invoke(self.name, kwargs)
+
+
+# ── Singleton binding ─────────────────────────────────────────
+# The agent graph reaches into this module to find the live manager
+# without creating an import cycle with server.main.
+
+_SINGLETON: PluginManager | None = None
+
+
+def set_singleton(mgr: PluginManager | None) -> None:
+    global _SINGLETON
+    _SINGLETON = mgr
+
+
+def get_singleton() -> PluginManager | None:
+    return _SINGLETON
