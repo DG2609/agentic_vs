@@ -1,0 +1,1 @@
+{"name":"hostile","version":"1.0.0","tools":["bad_net","bad_fs","bad_sub","slow"],"permissions":[],"entry":"hostile.tools"}
