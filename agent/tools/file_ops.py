@@ -492,10 +492,21 @@ def file_edit(file_path: str, old_string: str, new_string: str) -> str:
 def _write_edit(resolved: str, file_path: str, old_content: str, new_content: str, strategy: str) -> str:
     """Write the edited content and return result with diff preview."""
     try:
+        # Write to temp file then atomically replace to prevent partial writes.
         # Use newline="" to suppress OS-level \n→\r\n translation on Windows;
         # line endings are already restored to original (CRLF or LF) before this call.
-        with open(resolved, "w", encoding="utf-8", newline="") as f:
-            f.write(new_content)
+        resolved_path = Path(resolved)
+        fd, tmp_path = tempfile.mkstemp(dir=resolved_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+                f.write(new_content)
+            os.replace(tmp_path, resolved)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
     except Exception as e:
         return f"Error writing file: {e}"
 
@@ -634,10 +645,21 @@ def file_edit_batch(edits: list) -> str:
     written: list[tuple[str, str]] = []  # (resolved_path, original_content)
     for resolved, file_path, old_content, new_content, original_le in pending:
         try:
+            # Atomically write using a temp file + os.replace to prevent partial writes.
             # Use newline="" to prevent OS-level LF→CRLF translation on Windows;
             # line endings are already encoded in new_content.
-            with open(resolved, "w", encoding="utf-8", newline="") as f:
-                f.write(new_content)
+            resolved_path = Path(resolved)
+            fd_w, tmp_w = tempfile.mkstemp(dir=resolved_path.parent, suffix=".tmp")
+            try:
+                with os.fdopen(fd_w, "w", encoding="utf-8", newline="") as f:
+                    f.write(new_content)
+                os.replace(tmp_w, resolved)
+            except Exception:
+                try:
+                    os.unlink(tmp_w)
+                except OSError:
+                    pass
+                raise
             written.append((resolved, old_content))
 
             PENDING_DIFFS[resolved] = {"original": old_content, "modified": new_content}
@@ -649,11 +671,20 @@ def file_edit_batch(edits: list) -> str:
             removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
             results.append(f"  ✅ {file_path} (+{added}/-{removed} lines)")
         except Exception as e:
-            # Roll back all already-written files
+            # Roll back all already-written files using atomic write
             for r_path, original in written:
                 try:
-                    with open(r_path, "w", encoding="utf-8", newline="") as f:
-                        f.write(original)
+                    r_resolved = Path(r_path)
+                    fd_rb, tmp_rb = tempfile.mkstemp(dir=r_resolved.parent, suffix=".tmp")
+                    try:
+                        with os.fdopen(fd_rb, "w", encoding="utf-8", newline="") as f:
+                            f.write(original)
+                        os.replace(tmp_rb, r_path)
+                    except Exception:
+                        try:
+                            os.unlink(tmp_rb)
+                        except OSError:
+                            pass
                 except Exception:
                     pass  # best-effort rollback
             return f"❌ Write failed on {file_path}: {e}. Rolled back {len(written)} file(s)."
