@@ -4,6 +4,9 @@ import Spinner from 'ink-spinner';
 import { useServer } from './hooks/useServer.js';
 import { useSocket } from './hooks/useSocket.js';
 import { useIntel } from './hooks/useIntel.js';
+import { useQuality } from './hooks/useQuality.js';
+import { usePlugins } from './hooks/usePlugins.js';
+import type { HubPlugin } from './hooks/usePlugins.js';
 import ChatPane from './components/ChatPane.js';
 import Sidebar from './components/Sidebar.js';
 import InputBox from './components/InputBox.js';
@@ -11,6 +14,10 @@ import StatusBar from './components/StatusBar.js';
 import ProviderPicker from './components/ProviderPicker.js';
 import ModelPicker from './components/ModelPicker.js';
 import IntelPanel from './components/IntelPanel.js';
+import QualityPanel from './components/QualityPanel.js';
+import { PluginPicker } from './components/PluginPicker.js';
+import { InstallWizard } from './components/InstallWizard.js';
+import { QualityReport } from './components/QualityReport.js';
 import { theme } from './theme.js';
 import type { FileNode } from './types.js';
 import type { ProviderItem } from './components/ProviderPicker.js';
@@ -39,6 +46,10 @@ const HELP_TEXT = `◆ ShadowDev — Commands & Shortcuts
   /new              Start a new session
   /fork             Fork current session
   /plan             Enter plan mode
+  /plugins          Open plugin manager
+  /plugin install <name>    Open install wizard
+  /plugin audit <name>      Audit a hub plugin
+  /plugin uninstall <name>  Uninstall a plugin
   /help             Show this help
   /exit             Exit ShadowDev
 
@@ -52,6 +63,11 @@ export default function App() {
   const server = useServer();
   const socket = useSocket(server.isReady);
   const intel = useIntel(socket.socket);
+  const quality = useQuality(socket.socket);
+  const plugins = usePlugins(socket.socket);
+
+  const [pluginsOpen, setPluginsOpen] = useState(false);
+  const [wizardPlugin, setWizardPlugin] = useState<HubPlugin | null>(null);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [threadId, setThreadId] = useState(() => crypto.randomUUID());
@@ -159,7 +175,7 @@ export default function App() {
 
   // Keyboard shortcuts
   useInput((input, key) => {
-    if (pickerOpen || modelPickerOpen) return; // pickers handle their own input
+    if (pickerOpen || modelPickerOpen || pluginsOpen || wizardPlugin) return; // overlays handle their own input
     if (key.ctrl) {
       if (input === 'b') setSidebarOpen(o => !o);
       if (input === 'l') socket.clearMessages();
@@ -317,10 +333,86 @@ export default function App() {
       return;
     }
 
+    // /quality — start QualityIntel review→improve loop
+    if (trimmed === '/quality') {
+      socket.injectMessage('QualityIntel started — scanning project quality...');
+      fetch(`${BACKEND}/api/quality/start`, { method: 'POST' }).catch(() => {});
+      return;
+    }
+
+    // /quality stop — stop QualityIntel
+    if (trimmed === '/quality stop') {
+      socket.injectMessage('QualityIntel stopping...');
+      fetch(`${BACKEND}/api/quality/stop`, { method: 'POST' }).catch(() => {});
+      return;
+    }
+
+    // /plugins — open plugin manager overlay
+    if (trimmed === '/plugins') {
+      setPluginsOpen(true);
+      return;
+    }
+
+    // /plugin install <name>
+    if (trimmed.startsWith('/plugin install ')) {
+      const name = trimmed.slice('/plugin install '.length).trim();
+      if (!name) {
+        socket.injectMessage('Usage: /plugin install <name>');
+        return;
+      }
+      fetch(`${BACKEND}/api/plugins/inspect?name=${encodeURIComponent(name)}`)
+        .then(r => r.json())
+        .then((d: HubPlugin | { error?: string }) => {
+          if ('error' in d && d.error) {
+            socket.injectMessage(`Error: ${d.error}`);
+          } else {
+            setWizardPlugin(d as HubPlugin);
+          }
+        })
+        .catch(err => socket.injectMessage(`Failed to inspect plugin: ${String(err)}`));
+      return;
+    }
+
+    // /plugin audit <name>
+    if (trimmed.startsWith('/plugin audit ')) {
+      const name = trimmed.slice('/plugin audit '.length).trim();
+      if (!name) {
+        socket.injectMessage('Usage: /plugin audit <name>');
+        return;
+      }
+      socket.injectMessage(`Auditing ${name}…`);
+      plugins
+        .runAudit(name)
+        .then(r => {
+          const blocks = r.blockers.length;
+          const issues = r.issues.length;
+          socket.injectMessage(
+            `Audit ${name}: score ${r.score}/100 ${r.blocked ? '[BLOCKED] ' : ''}` +
+            `(${blocks} blockers, ${issues} warnings)`,
+          );
+        })
+        .catch(err => socket.injectMessage(`Audit failed: ${String(err)}`));
+      return;
+    }
+
+    // /plugin uninstall <name>
+    if (trimmed.startsWith('/plugin uninstall ')) {
+      const name = trimmed.slice('/plugin uninstall '.length).trim();
+      if (!name) {
+        socket.injectMessage('Usage: /plugin uninstall <name>');
+        return;
+      }
+      plugins
+        .uninstall(name)
+        .then(() => socket.injectMessage(`Uninstalled ${name}.`))
+        .catch(err => socket.injectMessage(`Uninstall failed: ${String(err)}`));
+      return;
+    }
+
     // /plan — send to AI (it's a mode toggle, not a UI-only command)
     // Everything else → send to AI
     socket.sendMessage(trimmed, threadId);
-  }, [socket, threadId, themeName, openProviderPicker, openModelPicker]);
+  }, [socket, threadId, themeName, openProviderPicker, openModelPicker, plugins]);
 
   const handleCancel = useCallback(() => {
     socket.stopGeneration(threadId);
@@ -411,6 +503,24 @@ export default function App() {
         />
       )}
 
+      {/* Plugin picker overlay */}
+      {pluginsOpen && !wizardPlugin && (
+        <PluginPicker
+          plugins={plugins}
+          onClose={() => setPluginsOpen(false)}
+          onPickInstall={(p) => { setWizardPlugin(p); }}
+        />
+      )}
+
+      {/* Install wizard overlay */}
+      {wizardPlugin && (
+        <InstallWizard
+          plugin={wizardPlugin}
+          plugins={plugins}
+          onClose={() => { setWizardPlugin(null); }}
+        />
+      )}
+
       {/* Main content row */}
       <Box flexGrow={1} overflow="hidden" flexDirection="column">
         <Box flexGrow={1} overflow="hidden">
@@ -426,13 +536,14 @@ export default function App() {
           />
         </Box>
         {(intel.running || intel.round > 0) && <IntelPanel intel={intel} />}
+        {(quality.running || quality.round > 0 || quality.converged) && <QualityPanel quality={quality} />}
       </Box>
 
       {/* Input */}
       <InputBox
         onSubmit={handleSubmit}
         onCancel={handleCancel}
-        disabled={pickerOpen || modelPickerOpen}
+        disabled={pickerOpen || modelPickerOpen || pluginsOpen || wizardPlugin !== null}
         streaming={socket.streaming}
       />
 

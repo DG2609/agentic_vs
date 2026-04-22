@@ -23,6 +23,11 @@ const ALL_COMMANDS: SlashCommand[] = [
   { cmd: '/theme',     desc: 'Cycle color theme', instant: true },
   { cmd: '/exit',      desc: 'Exit ShadowDev', instant: true },
   { cmd: '/intel',     desc: 'Start PromptIntel continuous improvement engine', instant: true },
+  { cmd: '/quality',   desc: 'Start QualityIntel review→improve→converge loop', instant: true },
+  { cmd: '/plugins',            desc: 'Open plugin manager (install/uninstall/search hub)', instant: true },
+  { cmd: '/plugin install',     desc: 'Open install wizard for a hub plugin: /plugin install <name>' },
+  { cmd: '/plugin audit',       desc: 'Audit a hub plugin (no install): /plugin audit <name>' },
+  { cmd: '/plugin uninstall',   desc: 'Uninstall a plugin: /plugin uninstall <name>' },
 ];
 
 interface Props {
