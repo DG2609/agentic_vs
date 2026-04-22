@@ -7,6 +7,7 @@ The coordinator polls the queue and injects notifications into its stream.
 """
 import asyncio
 import logging
+import os
 import random
 import string
 import weakref
@@ -43,6 +44,8 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Tool
 from agent.tools.truncation import truncate_output
 
 logger = logging.getLogger(__name__)
+
+MAX_WORKERS = int(os.getenv("SHADOWDEV_MAX_WORKERS", "50"))
 
 _ROLE_PROMPTS = {
     "explorer": (
@@ -132,6 +135,8 @@ class WorkerPool:
     def __init__(self):
         self._workers: dict[str, WorkerEntry] = {}
         self.notification_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        self._worker_queues: dict[str, asyncio.Queue] = {}  # worker_id → dedicated notification queue
+        self._workers_lock = asyncio.Lock()  # protects _workers mutations
 
     async def spawn(
         self,
@@ -143,6 +148,10 @@ class WorkerPool:
         team: Optional[str] = None,
     ) -> str:
         """Spawn a new worker. Returns role-prefixed worker ID."""
+        if len(self._workers) >= MAX_WORKERS:
+            raise RuntimeError(
+                f"Worker limit reached ({MAX_WORKERS}). Stop existing workers before spawning more."
+            )
         worker_id = _generate_worker_id(role)
         llm = _create_worker_llm()
         task = asyncio.create_task(
@@ -156,7 +165,8 @@ class WorkerPool:
             task=task,
             team=team,
         )
-        self._workers[worker_id] = entry
+        async with self._workers_lock:
+            self._workers[worker_id] = entry
         logger.info(f"[pool] spawned worker {worker_id[:8]} role={role}")
         return worker_id
 
@@ -179,6 +189,8 @@ class WorkerPool:
         if not entry.task.done():
             entry.task.cancel()
         entry.status = "stopped"
+        # Remove under lock — best-effort (sync context, lock may not be held)
+        self._workers.pop(worker_id, None)
         logger.info(f"[pool] stopped worker {worker_id[:8]}")
         return f"Worker {worker_id[:8]} stopped."
 
@@ -199,7 +211,13 @@ class WorkerPool:
         return result
 
     def get_workers_by_team(self, team: str) -> list[str]:
-        return [w.id for w in self._workers.values() if w.team == team]
+        # Snapshot values under lock (sync helper — caller holds no lock)
+        workers_snapshot = list(self._workers.values())
+        return [w.id for w in workers_snapshot if w.team == team]
+
+    def get_all_workers(self) -> list[str]:
+        """Return a snapshot list of all current worker IDs."""
+        return list(self._workers.keys())
 
     async def _worker_loop(
         self,
@@ -301,6 +319,14 @@ class WorkerPool:
             f"<result>{result[:2000]}</result>\n"
             f"</task-notification>"
         )
+        # Feed dedicated per-worker queue first (for wait_for_worker consumers)
+        if worker_id in self._worker_queues:
+            try:
+                self._worker_queues[worker_id].put_nowait((status, notification))
+            except asyncio.QueueFull:
+                pass  # overflow: drop (consumer timed out)
+
+        # Also push to the global queue for external consumers (e.g. coordinator)
         try:
             self.notification_queue.put_nowait(notification)
         except asyncio.QueueFull:
@@ -320,3 +346,80 @@ class WorkerPool:
                     notification[:200],
                 )
         logger.info(f"[pool] notification pushed for {worker_id[:8]}: {status}")
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : agents
+# CC source : instruction_line (line ~15)
+# Technique :
+#   - NEVER create files unless theyre absolutely necessary for achieving
+#   your goal
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : agents
+# CC source : instruction_line (line ~16)
+# Technique :
+#   - NEVER proactively create documentation files (*
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : agents
+# CC source : template_literal (line ~24)
+# Technique :
+#   You are a file search specialist for Claude Code, Anthropic's official
+#   CLI for Claude
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : agents
+# CC source : instruction_line (line ~27)
+# Technique :
+#   This is a READ-ONLY exploration task
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : agents
+# CC source : instruction_line (line ~36)
+# Technique :
+#   Your role is EXCLUSIVELY to search and analyze existing code
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : agents
+# CC source : instruction_line (line ~48)
+# Technique :
+#   - NEVER use ${BASH_TOOL_NAME} for: mkdir touch rm cp mv git add git
+#   commit npm install pip install or any file creation/
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : agents
+# CC source : instruction_line (line ~50)
+# Technique :
+#   - Communicate your final report directly as a regular message - do NOT
+#   attempt to create files
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : agents
+# CC source : instruction_line (line ~52)
+# Technique :
+#   NOTE: You are meant to be a fast agent that returns output as quickly as
+#   possible
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : agents
+# CC source : instruction_line (line ~24)
+# Technique :
+#   This is a READ-ONLY planning task
+# [/PromptIntel] ------------------------------------------------------

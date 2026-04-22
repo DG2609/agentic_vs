@@ -65,3 +65,6 @@ class AgentState(BaseModel):
 
     # Message index in the parent session where the fork was created
     fork_point: Optional[int] = None
+
+    # Guards against infinite re-compaction loops
+    reactive_compact_attempted: bool = False
