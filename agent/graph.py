@@ -103,8 +103,16 @@ import config
 logger = logging.getLogger(__name__)
 
 # ── Tool concurrency + timeout ───────────────────────────────
-_TOOL_SEMAPHORE = asyncio.Semaphore(int(os.getenv("SHADOWDEV_MAX_TOOL_CONCURRENCY", "10")))
+_TOOL_SEMAPHORE: asyncio.Semaphore | None = None
+_TOOL_SEMAPHORE_COUNT = int(os.getenv("SHADOWDEV_MAX_TOOL_CONCURRENCY", "10"))
 _TOOL_TIMEOUT_S = float(os.getenv("SHADOWDEV_TOOL_TIMEOUT_S", "120"))
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    global _TOOL_SEMAPHORE
+    if _TOOL_SEMAPHORE is None:
+        _TOOL_SEMAPHORE = asyncio.Semaphore(_TOOL_SEMAPHORE_COUNT)
+    return _TOOL_SEMAPHORE
 
 # ── Core tool set (used for skill dedup) ────────────────────
 _CORE_TOOLS = [
@@ -151,6 +159,55 @@ _planner_skills, _coder_skills = _load_skills(existing_names=_all_core_names)
 _existing_names = _all_core_names | {t.name for t in _planner_skills + _coder_skills}
 _plugin_planner, _plugin_coder = _get_plugin_tools(existing_names=_existing_names)
 
+
+# ── Load sandbox-managed plugins (installed via PluginManager) ──────────────
+def _load_sandbox_plugin_tools() -> list:
+    """Eagerly load runtime tools from the installed-plugin singleton manager.
+
+    Runs the async `load_runtime` for every DB row with status='installed'.
+    Failures on individual plugins are logged and skipped — they never break
+    graph construction.
+    """
+    try:
+        from agent.plugins.manager import get_singleton
+    except Exception:
+        return []
+    mgr = get_singleton()
+    if mgr is None:
+        return []
+
+    rows = mgr.list_installed()
+    if not rows:
+        return []
+
+    async def _load_all():
+        results = []
+        for row in rows:
+            if row.status != "installed":
+                continue
+            try:
+                tools = await mgr.load_runtime(row.name)
+                results.extend(tools)
+            except Exception as e:
+                logger.warning(f"Plugin {row.name!r} failed to load: {e}")
+        return results
+
+    try:
+        try:
+            asyncio.get_running_loop()
+            return []
+        except RuntimeError:
+            pass
+        return asyncio.run(_load_all())
+    except Exception as e:
+        logger.warning(f"Sandbox plugin bulk-load failed: {e}")
+        return []
+
+
+_sandbox_plugins = _load_sandbox_plugin_tools()
+if _sandbox_plugins:
+    logger.info(f"Loaded {len(_sandbox_plugins)} sandbox plugin tool(s)")
+
 # ── Load MCP server tools ────────────────────────────────────
 _mcp_planner_tools, _mcp_coder_tools = _load_mcp_tools(config.MCP_SERVERS)
 
@@ -161,8 +218,6 @@ PLANNER_TOOLS = [
     code_search, grep_search, batch_read, semantic_search, index_codebase,
     file_read, glob_search, file_list, code_analyze, webfetch, web_search,
     notebook_edit,
-    # Patch application (read-safe preview also useful for planner)
-    apply_patch,
     # Code insight
     code_quality, dep_graph, context_build,
     # LSP
@@ -190,8 +245,6 @@ PLANNER_TOOLS = [
     cron_create, cron_list, cron_delete,
     # Tool discovery
     tool_search, tool_list,
-    # Config viewer/editor
-    config_get, config_list,
     # Context brief
     brief,
     # Agent state + diagnostics
@@ -208,6 +261,8 @@ PLANNER_TOOLS = [
     *_planner_skills,
     # Pip-installed plugins (read/both access)
     *_plugin_planner,
+    # Sandbox-managed plugins (PluginManager — permission-gated subprocess)
+    *_sandbox_plugins,
     # MCP server tools (read/both access)
     *_mcp_planner_tools,
     # MCP Resources + Prompts + health-check tools
@@ -216,7 +271,7 @@ PLANNER_TOOLS = [
 
 CODER_TOOLS = PLANNER_TOOLS + [
     # File write
-    file_edit, file_edit_batch, file_write, terminal_exec,
+    file_edit, file_edit_batch, file_write, apply_patch, terminal_exec,
     # Testing
     run_tests,
     # Git (write — local)
@@ -229,8 +284,6 @@ CODER_TOOLS = PLANNER_TOOLS + [
     github_create_issue, github_create_pr, github_comment,
     # GitLab (write)
     gitlab_create_issue, gitlab_create_mr, gitlab_comment,
-    # Config editor (write access — can change settings)
-    config_set,
     # Skill system (create, install, remove skills)
     skill_create, skill_install, skill_remove,
     # External skills (write access)
@@ -317,7 +370,7 @@ class HookedToolNode:
         - Concurrency cap: at most _TOOL_SEMAPHORE slots run simultaneously.
         - Per-tool timeout: raises ToolMessage with timeout notice if exceeded.
         """
-        async with _TOOL_SEMAPHORE:
+        async with _get_semaphore():
             try:
                 async def _call():
                     if hasattr(tool, "ainvoke"):
@@ -342,9 +395,6 @@ class HookedToolNode:
                 return f"Error: {type(e).__name__}: {e}"
 
     async def __call__(self, state):
-        if not self._has_hooks:
-            return await self._inner.ainvoke(state)
-
         messages = list(state["messages"]) if isinstance(state, dict) else list(state.messages)
         last_msg = messages[-1] if messages else None
 
@@ -353,11 +403,15 @@ class HookedToolNode:
 
         tool_calls = last_msg.tool_calls
 
-        # ── Step 1: Run all pre-hooks in parallel ─────────────────
-        pre_results = await asyncio.gather(*[
-            run_pre_hooks(tc.get("name", ""), tc.get("args", {}))
-            for tc in tool_calls
-        ])
+        # ── Step 1: Run all pre-hooks in parallel (only if hooks configured) ─
+        if self._has_hooks:
+            pre_results = await asyncio.gather(*[
+                run_pre_hooks(tc.get("name", ""), tc.get("args", {}))
+                for tc in tool_calls
+            ])
+        else:
+            from agent.hooks import HookResult as _HookResult
+            pre_results = [_HookResult() for _ in tool_calls]
 
         # ── Step 2: Partition blocked vs executable (preserve order) ─
         pending: list = [None] * len(tool_calls)  # (tc_id, tool_name, content)
@@ -385,7 +439,7 @@ class HookedToolNode:
 
             to_execute.append((i, tc_id, tool_name, effective_args, tool))
 
-        # ── Step 2b: Check permissions in parallel ────────────────
+        # ── Step 2b: Check permissions in parallel (ALWAYS, regardless of hooks) ─
         if to_execute:
             perm_results = await asyncio.gather(*[
                 check_permission(name, args)
@@ -413,11 +467,15 @@ class HookedToolNode:
                     content = exec_result
                 pending[i] = (tc_id, tool_name, content)
 
-        # ── Step 4: Run all post-hooks in parallel ────────────────
-        post_results = await asyncio.gather(*[
-            run_post_hooks(tool_name, {}, content)
-            for _, tool_name, content in pending
-        ])
+        # ── Step 4: Run all post-hooks in parallel (only if hooks configured) ─
+        if self._has_hooks:
+            post_results = await asyncio.gather(*[
+                run_post_hooks(tool_name, {}, content)
+                for _, tool_name, content in pending
+            ])
+        else:
+            from agent.hooks import HookResult as _HookResult
+            post_results = [_HookResult() for _ in pending]
 
         # ── Step 5: Build final ToolMessage list ──────────────────
         tool_messages = []
@@ -550,3 +608,19 @@ def build_graph(checkpointer=None):
     compiled = graph.compile(checkpointer=checkpointer)
 
     return compiled
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : tool_descriptions
+# CC source : template_literal (line ~39)
+# Technique :
+#   parameter to run the command in the background
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : tool_descriptions
+# CC source : template_literal (line ~68)
+# Technique :
+#   ${undercoverSection}# Git operations
+# [/PromptIntel] ------------------------------------------------------
