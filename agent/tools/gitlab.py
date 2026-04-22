@@ -18,6 +18,7 @@ import requests
 from langchain_core.tools import tool
 
 import config
+from agent.tools.truncation import truncate_output
 from models.tool_schemas import (
     GitlabListIssuesArgs,
     GitlabListMRsArgs,
@@ -193,11 +194,11 @@ def gitlab_list_issues(
             params["assignee_username"] = assignee
         issues = _request("GET", f"/projects/{rid}/issues", params=params)
         if not issues:
-            return f"No {state} issues found in {repo}."
+            return truncate_output(f"No {state} issues found in {repo}.")
         lines = [f"Issues in {repo} (state={state}, {len(issues)} shown):"]
         for issue in issues:
             lines.append("  " + _fmt_issue(issue))
-        return "\n".join(lines)
+        return truncate_output("\n".join(lines))
     except Exception as e:
         return f"[gitlab_list_issues error] {e}"
 
@@ -222,7 +223,7 @@ def gitlab_list_mrs(
             params["target_branch"] = target_branch
         mrs = _request("GET", f"/projects/{rid}/merge_requests", params=params)
         if not mrs:
-            return f"No {state} MRs found in {repo}."
+            return truncate_output(f"No {state} MRs found in {repo}.")
         lines = [f"Merge Requests in {repo} (state={state}, {len(mrs)} shown):"]
         for mr in mrs:
             src = mr.get("source_branch", "?")
@@ -232,7 +233,7 @@ def gitlab_list_mrs(
             url = mr.get("web_url", "")
             draft = " [DRAFT]" if mr.get("draft") or mr.get("work_in_progress") else ""
             lines.append(f"  !{iid} {title}{draft}\n    {src} → {tgt}\n    {url}")
-        return "\n".join(lines)
+        return truncate_output("\n".join(lines))
     except Exception as e:
         return f"[gitlab_list_mrs error] {e}"
 

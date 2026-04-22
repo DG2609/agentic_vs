@@ -17,6 +17,7 @@ import requests
 from langchain_core.tools import tool
 
 import config
+from agent.tools.truncation import truncate_output
 from models.tool_schemas import (
     GithubListIssuesArgs,
     GithubListPRsArgs,
@@ -175,11 +176,11 @@ def github_list_issues(
         # issues endpoint returns PRs too — filter them out
         issues = [i for i in issues if "pull_request" not in i]
         if not issues:
-            return f"No {state} issues found in {repo}."
+            return truncate_output(f"No {state} issues found in {repo}.")
         lines = [f"Issues in {repo} (state={state}, {len(issues)} shown):"]
         for issue in issues:
             lines.append("  " + _fmt_issue(issue))
-        return "\n".join(lines)
+        return truncate_output("\n".join(lines))
     except Exception as e:
         return f"[github_list_issues error] {e}"
 
@@ -203,7 +204,7 @@ def github_list_prs(
             params["base"] = base
         prs = _request("GET", f"/repos/{repo}/pulls", params=params)
         if not prs:
-            return f"No {state} PRs found in {repo}."
+            return truncate_output(f"No {state} PRs found in {repo}.")
         lines = [f"Pull Requests in {repo} (state={state}, {len(prs)} shown):"]
         for pr in prs:
             head = pr.get("head", {}).get("ref", "?")
@@ -213,7 +214,7 @@ def github_list_prs(
             url = pr.get("html_url", "")
             draft = " [DRAFT]" if pr.get("draft") else ""
             lines.append(f"  #{num} {title}{draft}\n    {head} → {base_ref}\n    {url}")
-        return "\n".join(lines)
+        return truncate_output("\n".join(lines))
     except Exception as e:
         return f"[github_list_prs error] {e}"
 
@@ -267,7 +268,7 @@ def github_get_pr(
             if len(files) > 20:
                 lines.append(f"    ... and {len(files) - 20} more files")
 
-        return "\n".join(lines)
+        return truncate_output("\n".join(lines))
     except Exception as e:
         return f"[github_get_pr error] {e}"
 
@@ -300,7 +301,7 @@ def github_create_issue(
         result = _request("POST", f"/repos/{repo}/issues", json=payload)
         num = result.get("number")
         url = result.get("html_url", "")
-        return f"Created issue #{num}: {title}\n  {url}"
+        return truncate_output(f"Created issue #{num}: {title}\n  {url}")
     except Exception as e:
         return f"[github_create_issue error] {e}"
 
@@ -335,7 +336,7 @@ def github_create_pr(
         num = result.get("number")
         url = result.get("html_url", "")
         draft_str = " [DRAFT]" if draft else ""
-        return f"Created PR #{num}{draft_str}: {title}\n  {branch} → {base}\n  {url}"
+        return truncate_output(f"Created PR #{num}{draft_str}: {title}\n  {branch} → {base}\n  {url}")
     except Exception as e:
         return f"[github_create_pr error] {e}"
 
@@ -359,6 +360,6 @@ def github_comment(
             json={"body": body},
         )
         url = result.get("html_url", "")
-        return f"Comment posted on #{number}.\n  {url}"
+        return truncate_output(f"Comment posted on #{number}.\n  {url}")
     except Exception as e:
         return f"[github_comment error] {e}"
