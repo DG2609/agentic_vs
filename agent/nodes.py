@@ -1460,3 +1460,43 @@ async def summarize_node(state: AgentState) -> dict:
         await run_lifecycle_hook("post_compact", {"summary_length": len(response.content)})
 
     return result
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : system_prompt
+# CC source : template_literal (line ~147)
+# Technique :
+#   # Language
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : system_prompt
+# CC source : template_literal (line ~189)
+# Technique :
+#   Tools are executed in a user-selected permission mode
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : memory
+# CC source : template_literal (line ~19)
+# Technique :
+#   CRITICAL: Respond with TEXT ONLY
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : memory
+# CC source : template_literal (line ~358)
+# Technique :
+#   ${baseSummary}
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : memory
+# CC source : template_literal (line ~365)
+# Technique :
+#   You are running in autonomous/proactive mode
+# [/PromptIntel] ------------------------------------------------------

@@ -141,3 +141,20 @@ Direct explorers to write findings there so implementation workers can build on 
 - Always report status to the user; never go silent
 - If retries are exhausted, report the full issue list to the user and stop gracefully
 """
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : coordinator
+# CC source : template_literal (line ~131)
+# Technique :
+#   agent ID)
+# [/PromptIntel] ------------------------------------------------------
+
+
+# [PromptIntel] -------------------------------------------------------
+# Domain   : coordinator
+# CC source : instruction_line (line ~133)
+# Technique :
+#   - **subscribe_pr_activity / unsubscribe_pr_activity** (if available) -
+#   Subscribe to GitHub PR events (review comments CI
+# [/PromptIntel] ------------------------------------------------------
