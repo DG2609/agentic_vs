@@ -36,6 +36,7 @@ class RuntimeSandbox:
         self.call_timeout_s = call_timeout_s
         self._proc: asyncio.subprocess.Process | None = None
         self._tools: list[str] = []
+        self._tool_descriptors: list[dict] = []
         self._next_id = 1
         self._lock = asyncio.Lock()
         self._stderr_task: asyncio.Task | None = None
@@ -61,7 +62,8 @@ class RuntimeSandbox:
         except BaseException:
             await self._kill_proc()
             raise
-        self._tools = [t["name"] for t in ack.get("tools", [])]
+        self._tool_descriptors = list(ack.get("tools", []))
+        self._tools = [t["name"] for t in self._tool_descriptors]
 
     async def stop(self) -> None:
         if self._proc is None:
@@ -112,6 +114,10 @@ class RuntimeSandbox:
 
     def tool_names(self) -> list[str]:
         return list(self._tools)
+
+    def tool_descriptors(self) -> list[dict]:
+        """Return the full per-tool descriptors returned at handshake."""
+        return list(self._tool_descriptors)
 
     async def invoke(self, name: str, args: dict):
         try:

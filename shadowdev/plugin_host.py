@@ -171,6 +171,31 @@ def _load_plugin(plugin_dir: str) -> dict:
     return tools
 
 
+def _tool_descriptor(tool) -> dict:
+    """Produce a JSON descriptor for a LangChain tool.
+
+    Sends name + description + JSON-schema of args when possible so the host
+    can build a pydantic model matching the plugin-side signature.
+    """
+    desc = {
+        "name": getattr(tool, "name", ""),
+        "description": getattr(tool, "description", "") or "",
+    }
+    schema = None
+    args_schema = getattr(tool, "args_schema", None)
+    if args_schema is not None:
+        try:
+            if hasattr(args_schema, "model_json_schema"):  # pydantic v2
+                schema = args_schema.model_json_schema()
+            elif hasattr(args_schema, "schema"):          # pydantic v1 fallback
+                schema = args_schema.schema()
+        except Exception:
+            schema = None
+    if schema is not None:
+        desc["schema"] = schema
+    return desc
+
+
 def _read_frame() -> dict | None:
     hdr = sys.stdin.buffer.read(4)
     if not hdr or len(hdr) < 4:
@@ -209,7 +234,10 @@ def main() -> int:
     except Exception as e:
         _write_frame(_err(rid, -32000, f"{type(e).__name__}: {e}\n{traceback.format_exc()}"))
         return 1
-    _write_frame(_ok(rid, {"ok": True, "tools": [{"name": n} for n in tools]}))
+    _write_frame(_ok(rid, {
+        "ok": True,
+        "tools": [_tool_descriptor(t) for t in tools.values()],
+    }))
 
     while True:
         req = _read_frame()
@@ -220,7 +248,7 @@ def main() -> int:
         params = req.get("params") or {}
         try:
             if method == "tool.list":
-                _write_frame(_ok(rid, [{"name": n} for n in tools]))
+                _write_frame(_ok(rid, [_tool_descriptor(t) for t in tools.values()]))
             elif method == "tool.invoke":
                 name = params.get("name")
                 args = params.get("args") or {}
