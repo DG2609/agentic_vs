@@ -52,3 +52,33 @@ def test_upsert_updates_existing(db):
     assert p.version == "2"
     assert p.score == 90
     assert p.permissions == ["env"]
+
+
+def test_raw_report_round_trip(db):
+    report = {"score": 85, "blocked": False, "blockers": [], "issues": [
+        {"rule": "W1", "message": "msg", "severity": "low", "file": "a.py", "line": 1},
+    ]}
+    db.upsert(
+        name="r", version="1", status="installed", score=85,
+        permissions=[], install_path="/r", raw_report=report,
+    )
+    assert db.get_raw_report("r") == report
+
+
+def test_raw_report_missing_returns_none(db):
+    db.upsert(
+        name="nr", version="1", status="installed", score=85,
+        permissions=[], install_path="/nr",
+    )
+    assert db.get_raw_report("nr") is None
+
+
+def test_raw_report_preserved_across_status_update(db):
+    """Updating status must not clobber a previously persisted report."""
+    report = {"score": 80, "blocked": False, "blockers": [], "issues": []}
+    db.upsert(name="p", version="1", status="installed", score=80,
+              permissions=[], install_path="/p", raw_report=report)
+    # Re-upsert without passing raw_report — must be retained.
+    db.upsert(name="p", version="1", status="error", score=80,
+              permissions=[], install_path="/p", last_error="boom")
+    assert db.get_raw_report("p") == report

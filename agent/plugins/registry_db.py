@@ -22,9 +22,14 @@ CREATE TABLE IF NOT EXISTS plugins (
   install_path TEXT NOT NULL,
   installed_at TEXT NOT NULL,
   last_audited_at TEXT NOT NULL,
-  last_error TEXT
+  last_error TEXT,
+  raw_report TEXT
 );
 """
+
+_MIGRATIONS = [
+    "ALTER TABLE plugins ADD COLUMN raw_report TEXT",
+]
 
 
 def _utc_now() -> str:
@@ -56,6 +61,14 @@ class PluginRegistryDB:
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA)
 
+        # Additive migrations — tolerate columns already present.
+        for stmt in _MIGRATIONS:
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        self._conn.commit()
+
     def upsert(
         self,
         *,
@@ -66,16 +79,19 @@ class PluginRegistryDB:
         permissions: list[str],
         install_path: str,
         last_error: str | None = None,
+        raw_report: dict | None = None,
     ) -> None:
         now = _utc_now()
         cur = self._conn.execute("SELECT installed_at FROM plugins WHERE name=?", (name,))
         row = cur.fetchone()
         installed_at = row["installed_at"] if row else now
+        report_json = json.dumps(raw_report) if raw_report is not None else None
         self._conn.execute(
             """
             INSERT INTO plugins(name, version, status, score, permissions,
-                                install_path, installed_at, last_audited_at, last_error)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                install_path, installed_at, last_audited_at,
+                                last_error, raw_report)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name) DO UPDATE SET
                 version=excluded.version,
                 status=excluded.status,
@@ -83,14 +99,25 @@ class PluginRegistryDB:
                 permissions=excluded.permissions,
                 install_path=excluded.install_path,
                 last_audited_at=excluded.last_audited_at,
-                last_error=excluded.last_error
+                last_error=excluded.last_error,
+                raw_report=COALESCE(excluded.raw_report, plugins.raw_report)
             """,
             (
                 name, version, status, score, json.dumps(permissions),
-                install_path, installed_at, now, last_error,
+                install_path, installed_at, now, last_error, report_json,
             ),
         )
         self._conn.commit()
+
+    def get_raw_report(self, name: str) -> dict | None:
+        cur = self._conn.execute("SELECT raw_report FROM plugins WHERE name=?", (name,))
+        row = cur.fetchone()
+        if row is None or row["raw_report"] is None:
+            return None
+        try:
+            return json.loads(row["raw_report"])
+        except json.JSONDecodeError:
+            return None
 
     def get(self, name: str) -> InstalledPlugin | None:
         cur = self._conn.execute("SELECT * FROM plugins WHERE name=?", (name,))
