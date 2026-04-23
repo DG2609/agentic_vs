@@ -179,17 +179,64 @@ class _ProxyTool(BaseTool):
 
     def invoke(self, input, config=None, **kwargs):
         args = input if isinstance(input, dict) else {"input": input}
-        return asyncio.get_event_loop().run_until_complete(self.sb.invoke(self.name, args))
+        return _run_sync(self.sb.invoke(self.name, args))
 
     async def ainvoke(self, input, config=None, **kwargs):
         args = input if isinstance(input, dict) else {"input": input}
         return await self.sb.invoke(self.name, args)
 
     def _run(self, *args, **kwargs):
-        return asyncio.get_event_loop().run_until_complete(self.sb.invoke(self.name, kwargs))
+        return _run_sync(self.sb.invoke(self.name, kwargs))
 
     async def _arun(self, *args, **kwargs):
         return await self.sb.invoke(self.name, kwargs)
+
+
+def _run_sync(coro):
+    """Run a coroutine from a sync context without trampling on a live loop.
+
+    Three cases:
+      1. No running loop in current thread → asyncio.run.
+      2. A loop is running in *another* thread → schedule + wait via run_coroutine_threadsafe.
+      3. A loop is running in the *current* thread → raise. Sync invoke is unsafe
+         from async code — the caller should use `ainvoke` instead.
+    """
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+
+    if current is None:
+        return asyncio.run(coro)
+
+    # Loop is running in this thread — sync invoke would deadlock.
+    # Try to find a background loop on another thread if available.
+    bg = _get_background_loop()
+    if bg is not None and bg is not current:
+        fut = asyncio.run_coroutine_threadsafe(coro, bg)
+        return fut.result()
+    raise RuntimeError(
+        "Cannot invoke plugin tool synchronously from inside a running event loop; "
+        "use `await tool.ainvoke(...)` instead."
+    )
+
+
+_BG_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _get_background_loop() -> asyncio.AbstractEventLoop | None:
+    """Return a user-supplied background loop, if one has been registered."""
+    return _BG_LOOP
+
+
+def set_background_loop(loop: asyncio.AbstractEventLoop | None) -> None:
+    """Register a background asyncio loop that sync plugin invokes can dispatch to.
+
+    Intended for hosts that run the plugin manager inside an aiohttp/LangGraph
+    loop but expose sync entry points to LangChain.
+    """
+    global _BG_LOOP
+    _BG_LOOP = loop
 
 
 # ── Singleton binding ─────────────────────────────────────────
