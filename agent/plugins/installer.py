@@ -5,6 +5,8 @@ in tar members.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import io
 import logging
@@ -38,9 +40,16 @@ class BadArchiveError(InstallerError):
 
 
 class Installer:
-    def __init__(self, install_root: str | Path, temp_root: str | Path) -> None:
+    def __init__(
+        self,
+        install_root: str | Path,
+        temp_root: str | Path,
+        *,
+        hub_public_key: bytes | None = None,
+    ) -> None:
         self.install_root = Path(install_root)
         self.temp_root = Path(temp_root)
+        self.hub_public_key = hub_public_key
         self.install_root.mkdir(parents=True, exist_ok=True)
         self.temp_root.mkdir(parents=True, exist_ok=True)
 
@@ -54,6 +63,12 @@ class Installer:
                 raise IntegrityError(
                     f"SHA256 mismatch: expected {meta.sha256[:12]}..., got {actual[:12]}..."
                 )
+            if meta.signature:
+                if self.hub_public_key is None:
+                    raise IntegrityError(
+                        "plugin declared a signature but no hub public key is configured"
+                    )
+                _verify_signature(self.hub_public_key, meta.sha256, meta.signature)
             self._safe_extract(blob, stage)
             return stage
         except Exception:
@@ -104,3 +119,34 @@ class Installer:
             except TypeError:
                 # Python < 3.12 — fall back to un-filtered extract (checks above still apply)
                 tar.extractall(dest)
+
+
+def _verify_signature(pubkey_bytes: bytes, sha256_hex: str, signature_str: str) -> None:
+    """Verify an ed25519 detached signature over the sha256 digest (binary).
+
+    `signature_str` may be hex or base64. Raises IntegrityError on mismatch.
+    """
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from cryptography.exceptions import InvalidSignature
+    except Exception as e:
+        raise IntegrityError(f"cryptography not available: {e}")
+
+    # Decode signature — accept hex or base64.
+    try:
+        sig = binascii.unhexlify(signature_str)
+    except (binascii.Error, ValueError):
+        try:
+            sig = base64.b64decode(signature_str, validate=True)
+        except binascii.Error as e:
+            raise IntegrityError(f"signature is neither hex nor base64: {e}")
+
+    digest = bytes.fromhex(sha256_hex)
+    try:
+        pk = Ed25519PublicKey.from_public_bytes(pubkey_bytes)
+    except Exception as e:
+        raise IntegrityError(f"invalid ed25519 public key: {e}")
+    try:
+        pk.verify(sig, digest)
+    except InvalidSignature:
+        raise IntegrityError("ed25519 signature verification failed")

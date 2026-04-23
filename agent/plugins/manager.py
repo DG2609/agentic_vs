@@ -35,10 +35,14 @@ class PluginManager:
         temp_root: str | Path,
         db_path: str | Path,
         cache_dir: str | Path,
+        hub_public_key: bytes | None = None,
     ) -> None:
         self.install_root = Path(install_root)
         self.hub = HubScout(index_url=hub_index_url, cache_dir=cache_dir)
-        self.installer = Installer(install_root=install_root, temp_root=temp_root)
+        self.installer = Installer(
+            install_root=install_root, temp_root=temp_root,
+            hub_public_key=hub_public_key,
+        )
         self.auditor = QualityAuditor()
         self.registry = PluginRegistryDB(db_path)
         self._sandboxes: dict[str, RuntimeSandbox] = {}
@@ -113,6 +117,20 @@ class PluginManager:
             name=name, version=meta.version, status="installed",
             score=report.score, permissions=permissions or [],
             install_path=str(final),
+            raw_report={
+                "score": report.score,
+                "blocked": report.blocked,
+                "issues": [
+                    {"rule": i.rule, "message": i.message, "severity": i.severity,
+                     "file": i.file, "line": i.line}
+                    for i in report.issues
+                ],
+                "blockers": [
+                    {"rule": i.rule, "message": i.message, "severity": i.severity,
+                     "file": i.file, "line": i.line}
+                    for i in report.blockers
+                ],
+            },
         )
         result = self.registry.get(name)
         assert result is not None
@@ -142,7 +160,7 @@ class PluginManager:
             )
             raise
         self._sandboxes[name] = sb
-        return [self._make_proxy_tool(sb, tname) for tname in sb.tool_names()]
+        return [self._make_proxy_tool(sb, d) for d in sb.tool_descriptors()]
 
     async def unload(self, name: str) -> None:
         sb = self._sandboxes.pop(name, None)
@@ -157,8 +175,50 @@ class PluginManager:
         return self.registry.list_all()
 
     @staticmethod
-    def _make_proxy_tool(sb: RuntimeSandbox, tname: str):
-        return _ProxyTool(sb=sb, name=tname, description=f"Proxied plugin tool: {tname}")
+    def _make_proxy_tool(sb: RuntimeSandbox, descriptor: dict):
+        tname = descriptor.get("name", "")
+        tdesc = descriptor.get("description") or f"Proxied plugin tool: {tname}"
+        schema = descriptor.get("schema")
+        args_model = _build_args_model(tname, schema) if schema else _ProxyArgs
+        return _ProxyTool(
+            sb=sb, name=tname, description=tdesc, args_schema=args_model,
+        )
+
+
+def _build_args_model(tool_name: str, schema: dict) -> type[BaseModel]:
+    """Construct a permissive pydantic model from the plugin's JSON schema.
+
+    We don't try to recreate field-level validation — the plugin-side tool
+    still does that. What we want is a *description* the LLM can read so it
+    knows which kwargs to pass.
+    """
+    try:
+        from pydantic import Field, create_model
+    except Exception:
+        return _ProxyArgs
+
+    props = (schema or {}).get("properties") or {}
+    required = set((schema or {}).get("required") or [])
+
+    fields = {}
+    type_map = {
+        "string": str, "integer": int, "number": float,
+        "boolean": bool, "array": list, "object": dict,
+    }
+    for pname, prop in props.items():
+        py_type = type_map.get((prop or {}).get("type", ""), object)
+        description = (prop or {}).get("description", "")
+        default = ... if pname in required else (prop or {}).get("default", None)
+        fields[pname] = (py_type, Field(default=default, description=description))
+
+    if not fields:
+        return _ProxyArgs
+    try:
+        model = create_model(f"_PluginArgs_{tool_name}", **fields)  # type: ignore[arg-type]
+        model.model_config = ConfigDict(extra="allow")
+        return model
+    except Exception:
+        return _ProxyArgs
 
 
 class _ProxyArgs(BaseModel):

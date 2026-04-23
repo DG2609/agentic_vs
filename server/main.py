@@ -814,6 +814,20 @@ async def plugins_list(request: web.Request):
     return web.json_response({"plugins": [_installed_to_dict(r) for r in rows]})
 
 
+@routes.get('/api/plugins/report')
+async def plugins_report(request: web.Request):
+    """Return the persisted audit report for an installed plugin (404 if none)."""
+    if plugin_manager is None:
+        return web.json_response({"error": "plugin manager unavailable"}, status=503)
+    name = request.query.get("name", "").strip()
+    if not name:
+        return web.json_response({"error": "'name' query param required"}, status=400)
+    report = plugin_manager.registry.get_raw_report(name)
+    if report is None:
+        return web.json_response({"error": f"no report stored for {name}"}, status=404)
+    return web.json_response(report)
+
+
 @routes.get('/api/plugins/search')
 async def plugins_search(request: web.Request):
     """Search the plugin hub by query (and optional category)."""
@@ -1001,6 +1015,21 @@ async def create_app():
     hub_index_url = getattr(config, "PLUGIN_HUB_INDEX_URL",
                             os.environ.get("SHADOWDEV_PLUGIN_HUB_INDEX",
                                            "https://plugins.shadowdev.dev/index.json"))
+    _hub_pubkey_env = os.environ.get("SHADOWDEV_PLUGIN_HUB_PUBKEY", "").strip()
+    _hub_pubkey: bytes | None = None
+    if _hub_pubkey_env:
+        try:
+            import binascii as _bx
+            try:
+                _hub_pubkey = _bx.unhexlify(_hub_pubkey_env)
+            except (ValueError, _bx.Error):
+                import base64 as _b64
+                _hub_pubkey = _b64.b64decode(_hub_pubkey_env, validate=True)
+            if len(_hub_pubkey) != 32:
+                raise ValueError(f"expected 32-byte ed25519 pubkey, got {len(_hub_pubkey)} bytes")
+        except Exception as e:
+            logger.warning(f"SHADOWDEV_PLUGIN_HUB_PUBKEY invalid: {e} — signature verification disabled")
+            _hub_pubkey = None
     try:
         plugin_manager = PluginManager(
             hub_index_url=hub_index_url,
@@ -1008,6 +1037,7 @@ async def create_app():
             temp_root=_plugins_data / "tmp",
             db_path=_plugins_data / "registry.db",
             cache_dir=_plugins_data / "cache",
+            hub_public_key=_hub_pubkey,
         )
         # Best-effort startup sweep
         sweep = getattr(plugin_manager, "startup_sweep", None)
