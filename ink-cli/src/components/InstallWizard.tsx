@@ -21,21 +21,29 @@ export function InstallWizard({ plugin, plugins, onClose }: Props) {
   const [step, setStep] = useState<Step>('inspect');
   const [permsGranted, setPermsGranted] = useState<Set<string>>(new Set());
   const [permIdx, setPermIdx] = useState(0);
-  const [audit, setAudit] = useState<AuditResult | null>(null);
+  const [audit, setAudit] = useState<AuditResult | null>(
+    plugins.audit[plugin.name] ?? null,
+  );
   const [auditing, setAuditing] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Auto-fire audit on entering 'audit' step
+  // Auto-fire audit on entering 'audit' step — reuse cached result if present
+  // on the plugins hook so stepping back and forward doesn't re-hit the hub.
   useEffect(() => {
-    if (step === 'audit' && audit === null && !auditing) {
-      setAuditing(true);
-      plugins
-        .runAudit(plugin.name, plugin.version)
-        .then(r => setAudit(r))
-        .catch(e => setError(String(e)))
-        .finally(() => setAuditing(false));
+    if (step !== 'audit' || auditing) return;
+    const cached = plugins.audit[plugin.name];
+    if (cached !== undefined && audit === null) {
+      setAudit(cached);
+      return;
     }
+    if (audit !== null) return;
+    setAuditing(true);
+    plugins
+      .runAudit(plugin.name, plugin.version)
+      .then(r => setAudit(r))
+      .catch(e => setError(String(e)))
+      .finally(() => setAuditing(false));
   }, [step, audit, auditing, plugin.name, plugin.version, plugins]);
 
   const togglePerm = (p: string) => {
