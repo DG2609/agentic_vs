@@ -1,1 +1,1 @@
-{"name":"hostile","version":"1.0.0","tools":["bad_net","bad_fs","bad_sub","slow"],"permissions":[],"entry":"hostile.tools"}
+{"name":"hostile","version":"1.0.0","tools":["bad_net","bad_net_create_connection","bad_net_getaddrinfo","bad_fs","bad_fs_os_open","bad_sub","slow"],"permissions":[],"entry":"hostile.tools"}

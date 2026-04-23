@@ -19,6 +19,43 @@ async def test_network_denied_by_default():
 
 
 @pytest.mark.asyncio
+async def test_network_create_connection_denied():
+    sb = RuntimeSandbox(plugin_dir=FIX / "hostile_plugin", permissions=[])
+    await sb.start()
+    try:
+        with pytest.raises(Exception) as ei:
+            await sb.invoke("bad_net_create_connection", {})
+        assert "denied" in str(ei.value).lower()
+    finally:
+        await sb.stop()
+
+
+@pytest.mark.asyncio
+async def test_network_getaddrinfo_denied():
+    sb = RuntimeSandbox(plugin_dir=FIX / "hostile_plugin", permissions=[])
+    await sb.start()
+    try:
+        with pytest.raises(Exception) as ei:
+            await sb.invoke("bad_net_getaddrinfo", {})
+        assert "denied" in str(ei.value).lower()
+    finally:
+        await sb.stop()
+
+
+@pytest.mark.asyncio
+async def test_fs_os_open_denied():
+    """os.open bypasses builtins.open — make sure the lower path is also gated."""
+    sb = RuntimeSandbox(plugin_dir=FIX / "hostile_plugin", permissions=[])
+    await sb.start()
+    try:
+        with pytest.raises(Exception) as ei:
+            await sb.invoke("bad_fs_os_open", {})
+        assert "denied" in str(ei.value).lower()
+    finally:
+        await sb.stop()
+
+
+@pytest.mark.asyncio
 async def test_fs_read_denied_by_default():
     sb = RuntimeSandbox(plugin_dir=FIX / "hostile_plugin", permissions=[])
     await sb.start()

@@ -50,34 +50,84 @@ def _install_gates(perms: list[str]) -> None:
             else:
                 _ALLOW_FS_WRITE.append(os.sep)
 
+    # ── Network gates ────────────────────────────────────────
+    def _check_host(host: str) -> None:
+        if "*" in _ALLOW_NET:
+            return
+        h = host.lower()
+        if h not in (x.lower() for x in _ALLOW_NET):
+            raise PermissionDenied(f"denied: net.http ({host})")
+
     orig_connect = socket.socket.connect
+    orig_connect_ex = socket.socket.connect_ex
+    orig_create_connection = socket.create_connection
+    orig_getaddrinfo = socket.getaddrinfo
+
+    def _extract_host(address):
+        # AF_INET: (host, port); AF_INET6: (host, port, flow, scope)
+        # AF_UNIX: str path — disallow.
+        if isinstance(address, tuple) and address:
+            return str(address[0])
+        return ""
 
     def guarded_connect(self, address):
-        host = address[0] if isinstance(address, tuple) and address else ""
-        if "*" not in _ALLOW_NET and host.lower() not in (h.lower() for h in _ALLOW_NET):
-            raise PermissionDenied(f"denied: net.http ({host})")
+        _check_host(_extract_host(address))
         return orig_connect(self, address)
 
+    def guarded_connect_ex(self, address):
+        _check_host(_extract_host(address))
+        return orig_connect_ex(self, address)
+
+    def guarded_create_connection(address, *args, **kwargs):
+        _check_host(_extract_host(address))
+        return orig_create_connection(address, *args, **kwargs)
+
+    def guarded_getaddrinfo(host, *args, **kwargs):
+        _check_host(host if isinstance(host, str) else "")
+        return orig_getaddrinfo(host, *args, **kwargs)
+
     socket.socket.connect = guarded_connect  # type: ignore[assignment]
+    socket.socket.connect_ex = guarded_connect_ex  # type: ignore[assignment]
+    socket.create_connection = guarded_create_connection  # type: ignore[assignment]
+    socket.getaddrinfo = guarded_getaddrinfo  # type: ignore[assignment]
+
+    # ── FS gates ─────────────────────────────────────────────
+    def _check_fs(path_like, is_write: bool) -> Path:
+        path = os.fspath(path_like)
+        try:
+            real = Path(path).resolve()
+        except OSError:
+            real = Path(path)
+        roots = _ALLOW_FS_WRITE if is_write else _ALLOW_FS_READ
+        allowed = any(_is_under(real, Path(r).resolve()) for r in roots) if roots else False
+        if not allowed:
+            raise PermissionDenied(
+                f"denied: fs.{'write' if is_write else 'read'} ({real})"
+            )
+        return real
 
     import builtins
     orig_open = builtins.open
 
     def guarded_open(file, mode="r", *args, **kwargs):
-        path = os.fspath(file)
-        try:
-            real = Path(path).resolve()
-        except OSError:
-            real = Path(path)
         is_write = any(c in mode for c in ("w", "a", "x", "+"))
-        roots = _ALLOW_FS_WRITE if is_write else _ALLOW_FS_READ
-        allowed = any(_is_under(real, Path(r).resolve()) for r in roots) if roots else False
-        if not allowed:
-            raise PermissionDenied(f"denied: fs.{'write' if is_write else 'read'} ({real})")
+        _check_fs(file, is_write)
         return orig_open(file, mode, *args, **kwargs)
 
     builtins.open = guarded_open  # type: ignore[assignment]
 
+    # Also gate `os.open` — lower-level path that bypasses builtins.open
+    orig_os_open = os.open
+    _WRITE_FLAGS = getattr(os, "O_WRONLY", 0) | getattr(os, "O_RDWR", 0) | getattr(os, "O_CREAT", 0) | getattr(os, "O_TRUNC", 0) | getattr(os, "O_APPEND", 0)
+
+    def guarded_os_open(path, flags, *args, **kwargs):
+        is_write = bool(flags & _WRITE_FLAGS)
+        _check_fs(path, is_write)
+        return orig_os_open(path, flags, *args, **kwargs)
+
+    os.open = guarded_os_open  # type: ignore[assignment]
+
+    # ── Subprocess gate ──────────────────────────────────────
     orig_popen = _subprocess.Popen
 
     class GuardedPopen(orig_popen):  # type: ignore[misc, valid-type]
