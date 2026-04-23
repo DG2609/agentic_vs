@@ -21,7 +21,8 @@ from agent.plugins.types import PluginMeta
 logger = logging.getLogger(__name__)
 
 _DOWNLOAD_TIMEOUT_S = 60
-_MAX_ARTIFACT_BYTES = 50 * 1024 * 1024   # 50 MB hard cap
+_MAX_ARTIFACT_BYTES = 50 * 1024 * 1024            # 50 MB compressed
+_MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024       # 200 MB uncompressed (zip-bomb guard)
 
 
 class InstallerError(Exception):
@@ -85,9 +86,21 @@ class Installer:
     @staticmethod
     def _safe_extract(blob: bytes, dest: Path) -> None:
         with tarfile.open(fileobj=io.BytesIO(blob), mode="r:*") as tar:
+            total = 0
             for member in tar.getmembers():
                 if member.name.startswith("/") or ".." in Path(member.name).parts:
                     raise BadArchiveError(f"unsafe member: {member.name!r}")
                 if member.islnk() or member.issym():
                     raise BadArchiveError(f"symlink rejected: {member.name!r}")
-            tar.extractall(dest)
+                total += max(member.size, 0)
+                if total > _MAX_UNCOMPRESSED_BYTES:
+                    raise BadArchiveError(
+                        f"archive uncompresses to >{_MAX_UNCOMPRESSED_BYTES // (1024 * 1024)} MB"
+                    )
+            # filter="data" — the Python 3.12+ default for 3.14; rejects
+            # absolute paths, traversal, symlinks, and strips owner/mode bits.
+            try:
+                tar.extractall(dest, filter="data")
+            except TypeError:
+                # Python < 3.12 — fall back to un-filtered extract (checks above still apply)
+                tar.extractall(dest)

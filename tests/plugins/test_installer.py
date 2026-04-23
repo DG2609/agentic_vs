@@ -99,6 +99,30 @@ async def test_rejects_absolute_path_member(tmp_path, fake_hub):
         await inst.download_and_extract(meta)
 
 
+@pytest.mark.asyncio
+async def test_rejects_uncompressed_bomb(tmp_path, fake_hub, monkeypatch):
+    """A tarball that decompresses beyond the cap must be rejected."""
+    import agent.plugins.installer as inst_mod
+    # Lower the cap so the test stays fast.
+    monkeypatch.setattr(inst_mod, "_MAX_UNCOMPRESSED_BYTES", 1024 * 1024)
+    # Member declares 10 MB — exceeds 1 MB cap.
+    members = {"bomb.bin": b"\x00" * (10 * 1024 * 1024)}
+    blob = _make_tarball(members)
+    fake_hub["artefacts"]["bomb.tar.gz"] = blob
+    host = fake_hub["server"].host
+    port = fake_hub["server"].port
+
+    inst = Installer(install_root=tmp_path / "p", temp_root=tmp_path / "tmp")
+    from agent.plugins.types import PluginMeta
+    meta = PluginMeta(
+        name="bomb", version="1", sha256=_sha256(blob),
+        url=f"http://{host}:{port}/artefacts/bomb.tar.gz",
+    )
+    with pytest.raises(BadArchiveError) as ei:
+        await inst.download_and_extract(meta)
+    assert "uncompress" in str(ei.value).lower()
+
+
 def test_promote_idempotent_replace(tmp_path):
     inst = Installer(install_root=tmp_path / "p", temp_root=tmp_path / "tmp")
     s1 = tmp_path / "s1"
