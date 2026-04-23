@@ -161,12 +161,16 @@ _plugin_planner, _plugin_coder = _get_plugin_tools(existing_names=_existing_name
 
 
 # ── Load sandbox-managed plugins (installed via PluginManager) ──────────────
+_SANDBOX_PER_PLUGIN_TIMEOUT_S = float(os.getenv("SHADOWDEV_PLUGIN_LOAD_TIMEOUT_S", "15"))
+
+
 def _load_sandbox_plugin_tools() -> list:
     """Eagerly load runtime tools from the installed-plugin singleton manager.
 
-    Runs the async `load_runtime` for every DB row with status='installed'.
-    Failures on individual plugins are logged and skipped — they never break
-    graph construction.
+    Each plugin is loaded in parallel with its own per-plugin timeout so a
+    single slow/hanging plugin can't stall graph construction. Tools whose
+    names collide with core tools or previously loaded plugins are dropped.
+    Failures on individual plugins are logged and skipped.
     """
     try:
         from agent.plugins.manager import get_singleton
@@ -176,32 +180,53 @@ def _load_sandbox_plugin_tools() -> list:
     if mgr is None:
         return []
 
-    rows = mgr.list_installed()
+    rows = [r for r in mgr.list_installed() if r.status == "installed"]
     if not rows:
         return []
 
+    async def _load_one(row):
+        try:
+            return row.name, await asyncio.wait_for(
+                mgr.load_runtime(row.name),
+                timeout=_SANDBOX_PER_PLUGIN_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Plugin {row.name!r} load exceeded {_SANDBOX_PER_PLUGIN_TIMEOUT_S}s — skipping"
+            )
+        except Exception as e:
+            logger.warning(f"Plugin {row.name!r} failed to load: {e}")
+        return row.name, []
+
     async def _load_all():
-        results = []
-        for row in rows:
-            if row.status != "installed":
-                continue
-            try:
-                tools = await mgr.load_runtime(row.name)
-                results.extend(tools)
-            except Exception as e:
-                logger.warning(f"Plugin {row.name!r} failed to load: {e}")
-        return results
+        return await asyncio.gather(*(_load_one(r) for r in rows))
 
     try:
         try:
             asyncio.get_running_loop()
+            # Already inside an event loop — skip eager load to avoid blocking.
             return []
         except RuntimeError:
             pass
-        return asyncio.run(_load_all())
+        loaded = asyncio.run(_load_all())
     except Exception as e:
         logger.warning(f"Sandbox plugin bulk-load failed: {e}")
         return []
+
+    # Deduplicate against core tool names and between plugins themselves.
+    seen = set(_all_core_names) | {t.name for t in _planner_skills + _coder_skills} | {t.name for t in _plugin_planner + _plugin_coder}
+    accepted = []
+    for pname, tools in loaded:
+        for t in tools:
+            if t.name in seen:
+                logger.warning(
+                    f"Plugin {pname!r} tool {t.name!r} dropped — name collides "
+                    f"with an existing core/plugin tool"
+                )
+                continue
+            seen.add(t.name)
+            accepted.append(t)
+    return accepted
 
 
 _sandbox_plugins = _load_sandbox_plugin_tools()
