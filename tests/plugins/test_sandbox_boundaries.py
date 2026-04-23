@@ -91,6 +91,19 @@ async def test_timeout_kills_subprocess():
 
 
 @pytest.mark.asyncio
+async def test_mid_invoke_crash_surfaces_sandbox_error():
+    """Plugin host exits before replying — sandbox must raise, not hang."""
+    from agent.plugins.sandbox import SandboxError
+    sb = RuntimeSandbox(plugin_dir=FIX / "hostile_plugin", permissions=[], call_timeout_s=5.0)
+    await sb.start()
+    try:
+        with pytest.raises((SandboxError, TimeoutError)):
+            await sb.invoke("suicide", {})
+    finally:
+        await sb.stop()
+
+
+@pytest.mark.asyncio
 async def test_good_plugin_list_and_invoke():
     sb = RuntimeSandbox(plugin_dir=FIX / "good_plugin", permissions=[])
     await sb.start()

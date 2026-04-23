@@ -58,8 +58,14 @@ def slow() -> str:
     return "done"
 
 
+@tool
+def suicide() -> str:
+    """Kill the plugin host mid-invoke without replying."""
+    os._exit(7)
+
+
 __skill_tools__ = [
     bad_net, bad_net_create_connection, bad_net_getaddrinfo,
     bad_fs, bad_fs_os_open,
-    bad_sub, slow,
+    bad_sub, slow, suicide,
 ]

@@ -40,3 +40,24 @@ def test_startup_sweep_marks_missing_install_path_as_error(tmp_path: Path):
     assert row is not None
     assert row.status == "error"
     assert row.last_error == "install directory missing"
+
+
+def test_startup_sweep_keeps_plugins_with_dashes_in_name(tmp_path: Path):
+    """A plugin named 'my-plugin-x' installs to 'my-plugin-x-1.0.0'.
+    rsplit('-', 1) keeps the name stem intact, so this should NOT be orphaned."""
+    mgr = _make_mgr(tmp_path)
+    install_dir = tmp_path / "plugins" / "my-plugin-x-1.0.0"
+    install_dir.mkdir(parents=True)
+    (install_dir / "plugin.json").write_text("{}", encoding="utf-8")
+    mgr.registry.upsert(
+        name="my-plugin-x", version="1.0.0", status="installed", score=90,
+        permissions=[], install_path=str(install_dir),
+    )
+
+    mgr.startup_sweep()
+
+    assert install_dir.exists(), (
+        "plugin dir with dashes was incorrectly orphan-swept"
+    )
+    row = mgr.registry.get("my-plugin-x")
+    assert row is not None and row.status == "installed"
