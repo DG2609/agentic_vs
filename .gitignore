@@ -34,6 +34,10 @@ workspace/
 continue_dev_ref/
 opencode_ref/
 milvus/
+claude-code-leak_ref/
+
+# Claude local state
+.claude/worktrees/
 
 # Node
 node_modules/
