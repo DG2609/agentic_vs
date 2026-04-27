@@ -23,6 +23,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from agent.graph import build_graph
 from agent.team.prompt_intel import PromptIntelTeam
 from agent.team.quality_intel import QualityIntelTeam
+from agent.team.plugin_quality import PluginQualityTeam
 from agent.plugins.manager import PluginManager, PluginError
 from models.schemas import StreamChunk, ToolExecution
 import config
@@ -51,6 +52,10 @@ quality_task: "asyncio.Task | None" = None
 
 # Plugin manager global
 plugin_manager: "PluginManager | None" = None
+
+# PluginQualityTeam global state
+plugin_quality_team: "PluginQualityTeam | None" = None
+plugin_quality_task: "asyncio.Task | None" = None
 
 
 # ── Socket.IO Events ───────────────────────────────────────
@@ -766,6 +771,49 @@ async def quality_stop(request: web.Request):
     return web.json_response({"status": "stopped"})
 
 
+# ── PluginQuality Routes ───────────────────────────────────
+
+
+@routes.get('/api/plugin_quality/status')
+async def plugin_quality_status(request: web.Request):
+    """Return current PluginQualityTeam status."""
+    if plugin_quality_team is None:
+        return web.json_response({
+            "running": False, "converged": False, "round": 0,
+            "overall_score": 0, "total_issues": 0, "scores": {}, "issues": {},
+        })
+    return web.json_response(await plugin_quality_team.get_status())
+
+
+@routes.post('/api/plugin_quality/start')
+async def plugin_quality_start(request: web.Request):
+    """Start the PluginQualityTeam if not already running."""
+    global plugin_quality_team, plugin_quality_task
+    if plugin_quality_team is not None and plugin_quality_team.running:
+        return web.json_response({"status": "already_running", "round": plugin_quality_team.round})
+
+    plugin_quality_team = PluginQualityTeam(sio=sio)
+    plugin_quality_task = asyncio.create_task(plugin_quality_team.run_until_converged())
+    logger.info("PluginQualityTeam started via API")
+    return web.json_response({"status": "started"})
+
+
+@routes.post('/api/plugin_quality/stop')
+async def plugin_quality_stop(request: web.Request):
+    """Stop the running PluginQualityTeam."""
+    global plugin_quality_team, plugin_quality_task
+    if plugin_quality_task is not None and not plugin_quality_task.done():
+        plugin_quality_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(plugin_quality_task), timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    if plugin_quality_team is not None:
+        plugin_quality_team.running = False
+    logger.info("PluginQualityTeam stopped via API")
+    return web.json_response({"status": "stopped"})
+
+
 # ── Plugin Routes ──────────────────────────────────────────
 
 def _meta_to_dict(m) -> dict:
@@ -1085,6 +1133,15 @@ async def create_app():
                 pass
         if quality_team is not None:
             quality_team.running = False
+        # Stop PluginQualityTeam on shutdown
+        if plugin_quality_task is not None and not plugin_quality_task.done():
+            plugin_quality_task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.shield(plugin_quality_task), timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        if plugin_quality_team is not None:
+            plugin_quality_team.running = False
         # Stop all plugin sandboxes on shutdown
         if plugin_manager is not None:
             for pname in list(plugin_manager._sandboxes.keys()):
@@ -1110,6 +1167,12 @@ async def create_app():
     quality_team = QualityIntelTeam(sio=sio)
     quality_task = asyncio.create_task(quality_team.run_until_converged())
     print("🧪 QualityIntelTeam started — scanning project quality")
+
+    # Auto-start the PluginQualityTeam
+    global plugin_quality_team, plugin_quality_task
+    plugin_quality_team = PluginQualityTeam(sio=sio)
+    plugin_quality_task = asyncio.create_task(plugin_quality_team.run_until_converged())
+    print("🔌🧪 PluginQualityTeam started — auditing plugin subsystem")
 
     return app
 
