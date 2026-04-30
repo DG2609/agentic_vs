@@ -7,6 +7,7 @@ import { useIntel } from './hooks/useIntel.js';
 import { useQuality } from './hooks/useQuality.js';
 import { usePlugins } from './hooks/usePlugins.js';
 import type { HubPlugin } from './hooks/usePlugins.js';
+import { usePluginQuality } from './hooks/usePluginQuality.js';
 import ChatPane from './components/ChatPane.js';
 import Sidebar from './components/Sidebar.js';
 import InputBox from './components/InputBox.js';
@@ -15,6 +16,7 @@ import ProviderPicker from './components/ProviderPicker.js';
 import ModelPicker from './components/ModelPicker.js';
 import IntelPanel from './components/IntelPanel.js';
 import QualityPanel from './components/QualityPanel.js';
+import PluginQualityPanel from './components/PluginQualityPanel.js';
 import { PluginPicker } from './components/PluginPicker.js';
 import { InstallWizard } from './components/InstallWizard.js';
 import { QualityReport } from './components/QualityReport.js';
@@ -47,6 +49,8 @@ const HELP_TEXT = `◆ ShadowDev — Commands & Shortcuts
   /fork             Fork current session
   /plan             Enter plan mode
   /plugins          Open plugin manager
+  /plugin-quality   Start plugin subsystem quality scanner
+  /plugin-quality stop  Stop plugin quality scanner
   /plugin install <name>    Open install wizard
   /plugin audit <name>      Audit a hub plugin
   /plugin uninstall <name>  Uninstall a plugin
@@ -64,6 +68,7 @@ export default function App() {
   const socket = useSocket(server.isReady);
   const intel = useIntel(socket.socket);
   const quality = useQuality(socket.socket);
+  const pluginQuality = usePluginQuality(socket.socket);
   const plugins = usePlugins(socket.socket);
 
   const [pluginsOpen, setPluginsOpen] = useState(false);
@@ -347,6 +352,20 @@ export default function App() {
       return;
     }
 
+    // /plugin-quality — start PluginQualityTeam continuous scanner
+    if (trimmed === '/plugin-quality') {
+      socket.injectMessage('PluginQuality scanning plugin subsystem...');
+      fetch(`${BACKEND}/api/plugin_quality/start`, { method: 'POST' }).catch(() => {});
+      return;
+    }
+
+    // /plugin-quality stop — stop PluginQualityTeam
+    if (trimmed === '/plugin-quality stop') {
+      socket.injectMessage('PluginQuality stopping...');
+      fetch(`${BACKEND}/api/plugin_quality/stop`, { method: 'POST' }).catch(() => {});
+      return;
+    }
+
     // /plugins — open plugin manager overlay
     if (trimmed === '/plugins') {
       setPluginsOpen(true);
@@ -537,6 +556,9 @@ export default function App() {
         </Box>
         {(intel.running || intel.round > 0) && <IntelPanel intel={intel} />}
         {(quality.running || quality.round > 0 || quality.converged) && <QualityPanel quality={quality} />}
+        {(pluginQuality.running || pluginQuality.round > 0 || pluginQuality.converged) && (
+          <PluginQualityPanel pq={pluginQuality} />
+        )}
       </Box>
 
       {/* Input */}
